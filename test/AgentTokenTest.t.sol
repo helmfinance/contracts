@@ -2,6 +2,7 @@
 pragma solidity ^0.8.24;
 
 import "forge-std/Test.sol";
+import {Clones} from "@openzeppelin/contracts/proxy/Clones.sol";
 import "../src/core/AgentToken.sol";
 
 contract AgentTokenTest is Test {
@@ -13,7 +14,9 @@ contract AgentTokenTest is Test {
     uint256 constant AGENT_ID = 42;
 
     function setUp() public {
-        token = new AgentToken("Agent 42 Shares", "AGT-42", vault, AGENT_ID);
+        AgentToken impl = new AgentToken();
+        token = AgentToken(Clones.clone(address(impl)));
+        token.initialize("Agent 42 Shares", "AGT-42", vault, AGENT_ID);
     }
 
     // ---------------------------------------------------------------

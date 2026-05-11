@@ -2,6 +2,7 @@
 pragma solidity ^0.8.24;
 
 import "forge-std/Test.sol";
+import {Clones} from "@openzeppelin/contracts/proxy/Clones.sol";
 import "../src/yield/DividendDistributor.sol";
 import "../src/core/AgentToken.sol";
 import "../src/core/FounderVault.sol";
@@ -33,10 +34,14 @@ contract DividendDistributorTest is Test {
         distributor = new DividendDistributor(harvester, address(mockRegistry), address(usdc));
 
         // AgentToken: vault = mockVaultAddr so we can mint from it
-        agentToken = new AgentToken("Agent 1", "AGT-1", mockVaultAddr, AGENT_ID);
+        AgentToken tokenImpl = new AgentToken();
+        agentToken = AgentToken(Clones.clone(address(tokenImpl)));
+        agentToken.initialize("Agent 1", "AGT-1", mockVaultAddr, AGENT_ID);
 
         // FounderVault with distributor as the carry sender
-        founderVault = new FounderVault(
+        FounderVault fvImpl = new FounderVault();
+        founderVault = FounderVault(Clones.clone(address(fvImpl)));
+        founderVault.initialize(
             AGENT_ID,
             address(agentToken),
             address(new MockAgentVault()), // not used in these tests

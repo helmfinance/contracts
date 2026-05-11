@@ -17,9 +17,42 @@ interface IAgentVault is IERC4626 {
         Settled        // fully wound down, claim-only
     }
 
+    enum AssetKind { Synthetic, METHAdapter, USDYAdapter }
+
+    struct AssetEntry {
+        address asset;
+        AssetKind kind;
+    }
+
+    struct WeightConstraint {
+        address asset;
+        uint16  minBps;
+        uint16  maxBps;
+    }
+
     struct Position {
         address asset;     // SyntheticAsset, mETH, USDY adapter, etc.
         uint256 amount;
+    }
+
+    /// @notice Parameters for {initialize}. Mirrors what the legacy constructor took.
+    struct InitParams {
+        uint256 agentId;
+        bytes32 mandateHash;
+        string  mandateURI;
+        address agentToken;
+        address founderVault;
+        address registry;
+        address redemptionQueue;
+        address treasury;
+        address yieldHarvester;
+        address pythAdapter;
+        address usdc;
+        address executor;
+        Phase   initialPhase;
+        AssetEntry[] assets;
+        WeightConstraint[] weightConstraints;
+        uint64  seniorWindowDuration; // 0 → default
     }
 
     event Rebalanced(bytes32 indexed strategyHash, uint256 navAfter, uint256 timestamp);
@@ -51,6 +84,11 @@ interface IAgentVault is IERC4626 {
 
     /// @notice Pending dividend pool not yet distributed.
     function yieldPool() external view returns (uint256);
+
+    // -- Initialization --
+
+    /// @notice Initialize an EIP-1167 clone of this vault. Replaces the constructor.
+    function initialize(InitParams memory p) external;
 
     // -- Mutations --
 

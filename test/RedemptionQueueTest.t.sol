@@ -2,6 +2,7 @@
 pragma solidity ^0.8.24;
 
 import "forge-std/Test.sol";
+import {Clones} from "@openzeppelin/contracts/proxy/Clones.sol";
 import "../src/system/RedemptionQueue.sol";
 import "../src/core/AgentVault.sol";
 import "../src/core/AgentToken.sol";
@@ -33,23 +34,21 @@ contract RedemptionQueueTest is Test {
 
         mockRegistry = new MockHelmRegistry();
 
-        // Predict addresses: queue first, then token, then vault
-        uint64 nonce = vm.getNonce(address(this));
-        // queue = nonce, token = nonce+1, vault = nonce+2
-        address predictedQueue = vm.computeCreateAddress(address(this), nonce);
-        address predictedToken = vm.computeCreateAddress(address(this), nonce + 1);
-        address predictedVault = vm.computeCreateAddress(address(this), nonce + 2);
-
         queue = new RedemptionQueue(admin, address(mockRegistry));
-        require(address(queue) == predictedQueue, "queue addr");
 
-        agentToken = new AgentToken("Agent 1", "AGT-1", predictedVault, AGENT_ID);
-        require(address(agentToken) == predictedToken, "token addr");
+        // Clone token and vault, then initialize — clones avoid the circular-
+        // address problem the old constructor-based pattern needed predictions for.
+        AgentToken tokenImpl = new AgentToken();
+        AgentVault vaultImpl = new AgentVault();
+        agentToken = AgentToken(Clones.clone(address(tokenImpl)));
+        vault = AgentVault(Clones.clone(address(vaultImpl)));
 
-        AgentVault.AssetEntry[] memory emptyAssets = new AgentVault.AssetEntry[](0);
-        AgentVault.WeightConstraint[] memory emptyWc = new AgentVault.WeightConstraint[](0);
+        agentToken.initialize("Agent 1", "AGT-1", address(vault), AGENT_ID);
 
-        vault = new AgentVault(AgentVault.InitParams({
+        IAgentVault.AssetEntry[] memory emptyAssets = new IAgentVault.AssetEntry[](0);
+        IAgentVault.WeightConstraint[] memory emptyWc = new IAgentVault.WeightConstraint[](0);
+
+        vault.initialize(IAgentVault.InitParams({
             agentId: AGENT_ID,
             mandateHash: keccak256("mandate"),
             mandateURI: "ipfs://m",
@@ -67,7 +66,6 @@ contract RedemptionQueueTest is Test {
             weightConstraints: emptyWc,
             seniorWindowDuration: 0
         }));
-        require(address(vault) == predictedVault, "vault addr");
 
         // Set registry mock
         mockRegistry.setDeployment(AGENT_ID, IHelmRegistry.AgentDeployment({

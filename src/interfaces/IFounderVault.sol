@@ -30,6 +30,30 @@ interface IFounderVault {
     function carryBalance() external view returns (uint256);
     function isSubordinationActive() external view returns (bool);
 
+    /// @notice Initialize an EIP-1167 clone of this founder vault. Replaces the constructor.
+    /// @param agentId_ The agent identifier.
+    /// @param agentToken_ The AGT share token address.
+    /// @param vault_ The linked AgentVault address.
+    /// @param founder_ The founder address.
+    /// @param usdc_ USDC token address.
+    /// @param distributor_ DividendDistributor address (may call receiveCarry).
+    /// @param lockupDays_ Founder lockup duration in days (minimum 90).
+    /// @param subordinationThresholdBps_ Max cumulative withdrawal ratio before wind-down.
+    /// @param carryBps_ Must be exactly 1000 (10%).
+    /// @param founderShareBps_ Must be in [500, 3000].
+    function initialize(
+        uint256 agentId_,
+        address agentToken_,
+        address vault_,
+        address founder_,
+        address usdc_,
+        address distributor_,
+        uint64 lockupDays_,
+        uint16 subordinationThresholdBps_,
+        uint16 carryBps_,
+        uint16 founderShareBps_
+    ) external;
+
     /// @notice Receive founder's initial share allocation. Restricted to AgentVault on first mint.
     function depositFounderShares(uint256 amount) external;
 

@@ -2,6 +2,7 @@
 pragma solidity ^0.8.24;
 
 import "forge-std/Test.sol";
+import {Clones} from "@openzeppelin/contracts/proxy/Clones.sol";
 import "../src/core/FounderVault.sol";
 import "../src/core/AgentToken.sol";
 import "./mocks/MockERC20.sol";
@@ -9,6 +10,7 @@ import "./mocks/MockAgentVault.sol";
 
 contract FounderVaultTest is Test {
     FounderVault fv;
+    FounderVault fvImpl;
     AgentToken agentToken;
     MockERC20 usdc;
     MockAgentVault mockVault;
@@ -24,22 +26,36 @@ contract FounderVaultTest is Test {
         usdc = new MockERC20("USD Coin", "USDC", 6);
         mockVault = new MockAgentVault();
 
-        // Predict FounderVault address so AgentToken allows it
-        // Actually AgentToken's vault is the AgentVault, not FounderVault.
+        // AgentToken's vault is the AgentVault, not FounderVault.
         // For this test we use a token whose vault is address(this) so we can mint freely.
-        agentToken = new AgentToken("Agent 1 Shares", "AGT-1", address(this), AGENT_ID);
+        AgentToken tokenImpl = new AgentToken();
+        agentToken = AgentToken(Clones.clone(address(tokenImpl)));
+        agentToken.initialize("Agent 1 Shares", "AGT-1", address(this), AGENT_ID);
 
-        fv = new FounderVault(
-            AGENT_ID,
+        fvImpl = new FounderVault();
+        fv = _newFV(AGENT_ID, LOCKUP_DAYS, SUBORDINATION_BPS, 1000, 2000);
+    }
+
+    /// @dev Helper: clone + initialize a FounderVault. Returns the clone.
+    function _newFV(
+        uint256 agentId_,
+        uint64 lockupDays_,
+        uint16 subBps_,
+        uint16 carryBps_,
+        uint16 founderShareBps_
+    ) internal returns (FounderVault out) {
+        out = FounderVault(Clones.clone(address(fvImpl)));
+        out.initialize(
+            agentId_,
             address(agentToken),
             address(mockVault),
             founder,
             address(usdc),
             distributor,
-            LOCKUP_DAYS,
-            SUBORDINATION_BPS,
-            1000, // carryBps = 10%
-            2000  // founderShareBps = 20%
+            lockupDays_,
+            subBps_,
+            carryBps_,
+            founderShareBps_
         );
     }
 
@@ -58,24 +74,33 @@ contract FounderVaultTest is Test {
     // Constructor validation
     // ---------------------------------------------------------------
 
+    /// @dev Clone without initializing; lets us scope expectRevert to the initialize call.
+    function _cloneFV() internal returns (FounderVault) {
+        return FounderVault(Clones.clone(address(fvImpl)));
+    }
+
     function test_constructor_rejectsWrongCarryBps() public {
+        FounderVault t = _cloneFV();
         vm.expectRevert(FounderVault.InvalidCarryBps.selector);
-        new FounderVault(1, address(agentToken), address(mockVault), founder, address(usdc), distributor, 90, 5000, 500, 2000);
+        t.initialize(1, address(agentToken), address(mockVault), founder, address(usdc), distributor, 90, 5000, 500, 2000);
     }
 
     function test_constructor_rejectsLowFounderShareBps() public {
+        FounderVault t = _cloneFV();
         vm.expectRevert(FounderVault.InvalidFounderShareBps.selector);
-        new FounderVault(1, address(agentToken), address(mockVault), founder, address(usdc), distributor, 90, 5000, 1000, 400);
+        t.initialize(1, address(agentToken), address(mockVault), founder, address(usdc), distributor, 90, 5000, 1000, 400);
     }
 
     function test_constructor_rejectsHighFounderShareBps() public {
+        FounderVault t = _cloneFV();
         vm.expectRevert(FounderVault.InvalidFounderShareBps.selector);
-        new FounderVault(1, address(agentToken), address(mockVault), founder, address(usdc), distributor, 90, 5000, 1000, 3100);
+        t.initialize(1, address(agentToken), address(mockVault), founder, address(usdc), distributor, 90, 5000, 1000, 3100);
     }
 
     function test_constructor_rejectsShortLockup() public {
+        FounderVault t = _cloneFV();
         vm.expectRevert(FounderVault.InvalidLockupDays.selector);
-        new FounderVault(1, address(agentToken), address(mockVault), founder, address(usdc), distributor, 89, 5000, 1000, 2000);
+        t.initialize(1, address(agentToken), address(mockVault), founder, address(usdc), distributor, 89, 5000, 1000, 2000);
     }
 
     // ---------------------------------------------------------------

@@ -4,6 +4,7 @@ pragma solidity ^0.8.24;
 import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import {SafeERC20} from "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
 import {ReentrancyGuard} from "@openzeppelin/contracts/utils/ReentrancyGuard.sol";
+import {Initializable} from "@openzeppelin/contracts/proxy/utils/Initializable.sol";
 
 import {IFounderVault} from "../interfaces/IFounderVault.sol";
 import {IAgentToken} from "../interfaces/IAgentToken.sol";
@@ -12,7 +13,10 @@ import {IAgentVault} from "../interfaces/IAgentVault.sol";
 /// @title FounderVault
 /// @notice Holds the founder's AGT shares under lockup and subordination rules.
 ///         Receives 10% dev carry from DividendDistributor as USDC.
-contract FounderVault is IFounderVault, ReentrancyGuard {
+/// @dev Deployed once as an implementation; per-agent instances are EIP-1167 clones
+///      created by HelmRegistry. State previously held in `immutable` slots is now
+///      regular storage so it can be set inside {initialize}.
+contract FounderVault is IFounderVault, Initializable, ReentrancyGuard {
     using SafeERC20 for IERC20;
 
     uint256 internal constant BPS_DENOM = 10_000;
@@ -26,31 +30,31 @@ contract FounderVault is IFounderVault, ReentrancyGuard {
     error InvalidLockupDays();
 
     /// @notice Agent identifier.
-    uint256 public immutable override agentId;
+    uint256 public override agentId;
 
     /// @notice The linked AgentVault.
-    address public immutable override vault;
+    address public override vault;
 
     /// @notice The founder address.
-    address public immutable override founder;
+    address public override founder;
 
     /// @notice The AGT share token.
-    IAgentToken public immutable agentToken;
+    IAgentToken public agentToken;
 
     /// @notice USDC token for carry payouts.
-    IERC20 public immutable usdc;
+    IERC20 public usdc;
 
     /// @notice Address allowed to call receiveCarry (DividendDistributor).
-    address public immutable distributor;
+    address public distributor;
 
     /// @notice Timestamp after which founder may withdraw shares.
     uint64 public override lockupEndsAt;
 
     /// @notice Subordination threshold in basis points.
-    uint16 public immutable subordinationThresholdBps;
+    uint16 public subordinationThresholdBps;
 
     /// @notice Founder share percentage in basis points.
-    uint16 public immutable founderShareBps;
+    uint16 public founderShareBps;
 
     /// @notice Total shares ever deposited by the founder.
     uint256 public totalDeposited;
@@ -68,19 +72,15 @@ contract FounderVault is IFounderVault, ReentrancyGuard {
     bool internal _lockupSet;
 
     /// @notice Lockup duration in days (from mandate).
-    uint64 public immutable lockupDays;
+    uint64 public lockupDays;
 
-    /// @param agentId_ The agent identifier.
-    /// @param agentToken_ The AGT share token address.
-    /// @param vault_ The linked AgentVault address.
-    /// @param founder_ The founder address.
-    /// @param usdc_ USDC token address.
-    /// @param distributor_ DividendDistributor address (may call receiveCarry).
-    /// @param lockupDays_ Founder lockup duration in days (minimum 90).
-    /// @param subordinationThresholdBps_ Max cumulative withdrawal ratio before wind-down.
-    /// @param carryBps_ Must be exactly 1000 (10%).
-    /// @param founderShareBps_ Must be in [500, 3000].
-    constructor(
+    /// @notice Locks the implementation contract so only clones can be initialized.
+    constructor() {
+        _disableInitializers();
+    }
+
+    /// @inheritdoc IFounderVault
+    function initialize(
         uint256 agentId_,
         address agentToken_,
         address vault_,
@@ -91,7 +91,7 @@ contract FounderVault is IFounderVault, ReentrancyGuard {
         uint16 subordinationThresholdBps_,
         uint16 carryBps_,
         uint16 founderShareBps_
-    ) {
+    ) external override initializer {
         if (carryBps_ != REQUIRED_CARRY_BPS) revert InvalidCarryBps();
         if (founderShareBps_ < 500 || founderShareBps_ > 3000) revert InvalidFounderShareBps();
         if (lockupDays_ < 90) revert InvalidLockupDays();

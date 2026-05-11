@@ -2,6 +2,7 @@
 pragma solidity ^0.8.24;
 
 import "forge-std/Test.sol";
+import {Clones} from "@openzeppelin/contracts/proxy/Clones.sol";
 import "../src/core/AgentVault.sol";
 import "../src/core/AgentToken.sol";
 import "../src/adapters/PythPriceAdapter.sol";
@@ -56,27 +57,22 @@ contract AgentVaultTest is Test {
         treasury.setFeeRate(IPlatformTreasury.FeeKind.Redeem, 50);     // 0.5%
         treasury.setFeeRate(IPlatformTreasury.FeeKind.Rebalance, 5);   // 0.05%
 
-        // We need to deploy AgentToken with vault address, but vault address depends on
-        // AgentToken. Use CREATE2-style prediction or deploy vault first as placeholder.
-        // Easier: deploy vault first, compute address, then deploy token.
-        // Actually AgentVault takes agentToken as constructor param, so we use a two-step:
-        // 1. Predict vault address with vm.computeCreateAddress
-        // 2. Deploy AgentToken with predicted vault
-        // 3. Deploy AgentVault
+        // With EIP-1167 clones we clone both first, then initialize. No nonce
+        // prediction needed because each clone exists before its initialize call.
+        AgentToken tokenImpl = new AgentToken();
+        AgentVault vaultImpl = new AgentVault();
+        agentToken = AgentToken(Clones.clone(address(tokenImpl)));
+        vault = AgentVault(Clones.clone(address(vaultImpl)));
 
-        uint64 nonce = vm.getNonce(address(this));
-        // Next deploy is AgentToken (nonce), then AgentVault (nonce+1)
-        address predictedVault = vm.computeCreateAddress(address(this), nonce + 1);
+        agentToken.initialize("Agent 1 Shares", "AGT-1", address(vault), AGENT_ID);
 
-        agentToken = new AgentToken("Agent 1 Shares", "AGT-1", predictedVault, AGENT_ID);
+        IAgentVault.AssetEntry[] memory assets = new IAgentVault.AssetEntry[](1);
+        assets[0] = IAgentVault.AssetEntry({asset: address(sNVDA), kind: IAgentVault.AssetKind.Synthetic});
 
-        AgentVault.AssetEntry[] memory assets = new AgentVault.AssetEntry[](1);
-        assets[0] = AgentVault.AssetEntry({asset: address(sNVDA), kind: AgentVault.AssetKind.Synthetic});
+        IAgentVault.WeightConstraint[] memory wc = new IAgentVault.WeightConstraint[](1);
+        wc[0] = IAgentVault.WeightConstraint({asset: address(sNVDA), minBps: 0, maxBps: 5000}); // max 50%
 
-        AgentVault.WeightConstraint[] memory wc = new AgentVault.WeightConstraint[](1);
-        wc[0] = AgentVault.WeightConstraint({asset: address(sNVDA), minBps: 0, maxBps: 5000}); // max 50%
-
-        AgentVault.InitParams memory params = AgentVault.InitParams({
+        IAgentVault.InitParams memory params = IAgentVault.InitParams({
             agentId: AGENT_ID,
             mandateHash: keccak256("mandate"),
             mandateURI: "ipfs://mandate",
@@ -95,8 +91,7 @@ contract AgentVaultTest is Test {
             seniorWindowDuration: 0
         });
 
-        vault = new AgentVault(params);
-        require(address(vault) == predictedVault, "vault address mismatch");
+        vault.initialize(params);
 
         // Register vault in SyntheticAsset so it can mint/burn sNVDA
         sNVDA.registerVault(address(vault));

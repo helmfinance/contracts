@@ -3,16 +3,18 @@ pragma solidity ^0.8.24;
 
 import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import {SafeERC20} from "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
+import {Clones} from "@openzeppelin/contracts/proxy/Clones.sol";
 
 import {IHelmRegistry} from "../interfaces/IHelmRegistry.sol";
 import {IAgentVault} from "../interfaces/IAgentVault.sol";
-import {AgentToken} from "../core/AgentToken.sol";
-import {AgentVault} from "../core/AgentVault.sol";
-import {FounderVault} from "../core/FounderVault.sol";
+import {IAgentToken} from "../interfaces/IAgentToken.sol";
+import {IFounderVault} from "../interfaces/IFounderVault.sol";
 
 /// @title HelmRegistry
 /// @notice Singleton factory that deploys agent trios (AgentToken, AgentVault,
 ///         FounderVault) and tracks each agent's lifecycle phase.
+/// @dev Uses EIP-1167 minimal proxy clones of pre-deployed implementations so the
+///      registry's runtime bytecode stays well under the 24,576-byte EIP-170 cap.
 contract HelmRegistry is IHelmRegistry {
     using SafeERC20 for IERC20;
 
@@ -35,6 +37,12 @@ contract HelmRegistry is IHelmRegistry {
     address public immutable pythAdapter;
     address public immutable executor;
     address public immutable distributor;
+
+    // ─── clone implementations (set at deploy) ─────────────────────
+
+    address public immutable agentTokenImpl;
+    address public immutable agentVaultImpl;
+    address public immutable founderVaultImpl;
 
     // ─── default mandate params ────────────────────────────────────
 
@@ -65,7 +73,6 @@ contract HelmRegistry is IHelmRegistry {
     mapping(uint256 => AgentRecord) internal _agents;
     mapping(bytes32 => bool) internal _usedMandates;
     uint256 internal _nextAgentId;
-    uint256 internal _deployNonce;
 
     // ─── events ────────────────────────────────────────────────────
 
@@ -83,6 +90,9 @@ contract HelmRegistry is IHelmRegistry {
         address pythAdapter;
         address executor;
         address distributor;
+        address agentTokenImpl;
+        address agentVaultImpl;
+        address founderVaultImpl;
         uint64  defaultLockupDays;
         uint16  defaultSubordinationBps;
         uint16  defaultFounderShareBps;
@@ -97,11 +107,13 @@ contract HelmRegistry is IHelmRegistry {
         pythAdapter = p.pythAdapter;
         executor = p.executor;
         distributor = p.distributor;
+        agentTokenImpl = p.agentTokenImpl;
+        agentVaultImpl = p.agentVaultImpl;
+        founderVaultImpl = p.founderVaultImpl;
         defaultLockupDays = p.defaultLockupDays;
         defaultSubordinationBps = p.defaultSubordinationBps;
         defaultFounderShareBps = p.defaultFounderShareBps;
         _nextAgentId = 1;
-        _deployNonce = 1; // contract nonce starts at 1
     }
 
     // ─── IHelmRegistry ─────────────────────────────────────────────
@@ -125,7 +137,7 @@ contract HelmRegistry is IHelmRegistry {
         // Pull seed USDC from founder → deposit into vault
         IERC20(usdc).safeTransferFrom(msg.sender, address(this), seedUSDC);
         IERC20(usdc).forceApprove(dr.vault, seedUSDC);
-        AgentVault(dr.vault).deposit(seedUSDC, dr.founderVault);
+        IAgentVault(dr.vault).deposit(seedUSDC, dr.founderVault);
 
         // Record
         _agents[agentId] = AgentRecord({
@@ -160,7 +172,7 @@ contract HelmRegistry is IHelmRegistry {
         if (block.timestamp < endsAt) revert IncubationNotComplete(endsAt);
 
         a.phase = Phase.PublicLaunch;
-        AgentVault(a.vault).enterPublicLaunch();
+        IAgentVault(a.vault).enterPublicLaunch();
 
         emit PhaseAdvanced(agentId, Phase.Incubation, Phase.PublicLaunch);
     }
@@ -218,56 +230,53 @@ contract HelmRegistry is IHelmRegistry {
 
     // ─── internal: deploy trio ─────────────────────────────────────
 
+    /// @dev Clones the three implementations, then wires them together with their
+    ///      `initialize` calls. Each `Clones.clone` is a CREATE call, so the
+    ///      addresses are deterministic from this contract's nonce — but we use
+    ///      the actual return addresses rather than predicting, which keeps the
+    ///      bytecode small and avoids the manual nonce bookkeeping the legacy
+    ///      design needed for circular constructor wiring.
     function _deployTrio(
         uint256 agentId,
         address founderAddr,
         bytes32 mandateHash,
         string calldata mandateURI
     ) internal returns (DeployResult memory dr) {
-        uint256 baseNonce = _deployNonce;
-        address pToken = _predictAddress(baseNonce);
-        address pVault = _predictAddress(baseNonce + 1);
-        address pFV    = _predictAddress(baseNonce + 2);
+        dr.token = Clones.clone(agentTokenImpl);
+        dr.vault = Clones.clone(agentVaultImpl);
+        dr.founderVault = Clones.clone(founderVaultImpl);
 
-        // 1. AgentToken
-        AgentToken token = new AgentToken(
+        // 1. AgentToken — mint authority is the vault.
+        IAgentToken(dr.token).initialize(
             string.concat("Helm Agent ", _uint2str(agentId)),
             string.concat("AGT-", _uint2str(agentId)),
-            pVault,
+            dr.vault,
             agentId
         );
-        require(address(token) == pToken, "token addr");
 
-        // 2. AgentVault
-        AgentVault vault_ = _deployVault(agentId, mandateHash, mandateURI, pToken, pFV);
-        require(address(vault_) == pVault, "vault addr");
+        // 2. AgentVault — references token and founder vault by address.
+        _initVault(dr.vault, agentId, mandateHash, mandateURI, dr.token, dr.founderVault);
 
-        // 3. FounderVault
-        FounderVault fv = new FounderVault(
-            agentId, pToken, pVault, founderAddr, usdc, distributor,
+        // 3. FounderVault — references token and vault by address.
+        IFounderVault(dr.founderVault).initialize(
+            agentId, dr.token, dr.vault, founderAddr, usdc, distributor,
             defaultLockupDays, defaultSubordinationBps, 1000, defaultFounderShareBps
         );
-        require(address(fv) == pFV, "fv addr");
-
-        _deployNonce = baseNonce + 3;
-
-        dr.token = pToken;
-        dr.vault = pVault;
-        dr.founderVault = pFV;
     }
 
-    function _deployVault(
+    function _initVault(
+        address vault_,
         uint256 agentId_,
         bytes32 mandateHash_,
         string calldata mandateURI_,
         address token_,
         address founderVault_
-    ) internal returns (AgentVault) {
-        AgentVault.AssetEntry[] memory emptyAssets = new AgentVault.AssetEntry[](0);
-        AgentVault.WeightConstraint[] memory emptyWc = new AgentVault.WeightConstraint[](0);
+    ) internal {
+        IAgentVault.AssetEntry[] memory emptyAssets = new IAgentVault.AssetEntry[](0);
+        IAgentVault.WeightConstraint[] memory emptyWc = new IAgentVault.WeightConstraint[](0);
 
-        return new AgentVault(
-            AgentVault.InitParams({
+        IAgentVault(vault_).initialize(
+            IAgentVault.InitParams({
                 agentId: agentId_,
                 mandateHash: mandateHash_,
                 mandateURI: mandateURI_,
@@ -293,27 +302,6 @@ contract HelmRegistry is IHelmRegistry {
     function _agent(uint256 agentId) internal view returns (AgentRecord storage a) {
         a = _agents[agentId];
         if (a.vault == address(0)) revert AgentNotFound(agentId);
-    }
-
-    /// @dev Predict CREATE address for this contract at a given nonce.
-    function _predictAddress(uint256 nonce_) internal view returns (address) {
-        if (nonce_ <= 0x7f) {
-            return address(uint160(uint256(keccak256(
-                abi.encodePacked(bytes1(0xd6), bytes1(0x94), address(this), uint8(nonce_))
-            ))));
-        } else if (nonce_ <= 0xff) {
-            return address(uint160(uint256(keccak256(
-                abi.encodePacked(bytes1(0xd7), bytes1(0x94), address(this), bytes1(0x81), uint8(nonce_))
-            ))));
-        } else if (nonce_ <= 0xffff) {
-            return address(uint160(uint256(keccak256(
-                abi.encodePacked(bytes1(0xd8), bytes1(0x94), address(this), bytes1(0x82), uint16(nonce_))
-            ))));
-        } else {
-            return address(uint160(uint256(keccak256(
-                abi.encodePacked(bytes1(0xd9), bytes1(0x94), address(this), bytes1(0x83), uint24(nonce_))
-            ))));
-        }
     }
 
     /// @dev Simple uint to decimal string.

@@ -5,6 +5,7 @@ import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import {IERC20Metadata} from "@openzeppelin/contracts/token/ERC20/extensions/IERC20Metadata.sol";
 import {SafeERC20} from "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
 import {ReentrancyGuard} from "@openzeppelin/contracts/utils/ReentrancyGuard.sol";
+import {Initializable} from "@openzeppelin/contracts/proxy/utils/Initializable.sol";
 
 import {IAgentVault} from "../interfaces/IAgentVault.sol";
 import {IAgentToken} from "../interfaces/IAgentToken.sol";
@@ -21,7 +22,11 @@ import {IOndoUSDYAdapter} from "../interfaces/IOndoUSDYAdapter.sol";
 /// @dev Shares live in a separate IAgentToken contract; the IERC20 surface here
 ///      is a read-only facade. Standard ERC-4626 `withdraw`/`redeem` are disabled
 ///      — user redemptions go through the singleton RedemptionQueue.
-contract AgentVault is IAgentVault, ReentrancyGuard {
+///
+///      Deployed once as an implementation; per-agent instances are EIP-1167
+///      clones created by HelmRegistry. State previously held in `immutable`
+///      slots is now regular storage so it can be set inside {initialize}.
+contract AgentVault is IAgentVault, Initializable, ReentrancyGuard {
     using SafeERC20 for IERC20;
 
     // ─── constants ───────────────────────────────────────────────────────────
@@ -30,20 +35,7 @@ contract AgentVault is IAgentVault, ReentrancyGuard {
     uint256 internal constant SHARE_SCALE = 1e18;
     uint64  internal constant DEFAULT_SENIOR_WINDOW = 90 days;
 
-    // ─── types ───────────────────────────────────────────────────────────────
-
-    enum AssetKind { Synthetic, METHAdapter, USDYAdapter }
-
-    struct AssetEntry {
-        address asset;
-        AssetKind kind;
-    }
-
-    struct WeightConstraint {
-        address asset;
-        uint16  minBps;
-        uint16  maxBps;
-    }
+    // ─── types (extra, contract-internal) ────────────────────────────────────
 
     struct WindDown {
         bool    active;
@@ -53,25 +45,6 @@ contract AgentVault is IAgentVault, ReentrancyGuard {
         string  reason;
         uint256 seniorClaimableUsdc;
         uint256 juniorClaimableUsdc;
-    }
-
-    struct InitParams {
-        uint256 agentId;
-        bytes32 mandateHash;
-        string  mandateURI;
-        address agentToken;
-        address founderVault;
-        address registry;
-        address redemptionQueue;
-        address treasury;
-        address yieldHarvester;
-        address pythAdapter;
-        address usdc;
-        address executor;
-        Phase   initialPhase;
-        AssetEntry[] assets;
-        WeightConstraint[] weightConstraints;
-        uint64  seniorWindowDuration; // 0 → DEFAULT_SENIOR_WINDOW
     }
 
     // ─── extra errors (interface defines the rest) ───────────────────────────
@@ -91,18 +64,18 @@ contract AgentVault is IAgentVault, ReentrancyGuard {
     error ZeroAmount();
     error ZeroAddress();
 
-    // ─── immutable identity ──────────────────────────────────────────────────
+    // ─── identity (previously immutable, now regular storage for clones) ─────
 
-    uint256 public immutable override agentId;
-    bytes32 public immutable mandateHash;
-    address public immutable usdc;
-    IAgentToken public immutable agentToken;
-    IFounderVault public immutable founderVault;
-    IPlatformTreasury public immutable treasury;
-    address public immutable redemptionQueue;
-    address public immutable yieldHarvester;
-    address public immutable registry;
-    address public immutable pythAdapter;
+    uint256 public override agentId;
+    bytes32 public mandateHash;
+    address public usdc;
+    IAgentToken public agentToken;
+    IFounderVault public founderVault;
+    IPlatformTreasury public treasury;
+    address public redemptionQueue;
+    address public yieldHarvester;
+    address public registry;
+    address public pythAdapter;
 
     // ─── mutable state ───────────────────────────────────────────────────────
 
@@ -121,9 +94,15 @@ contract AgentVault is IAgentVault, ReentrancyGuard {
 
     uint256 internal _liquidationCursor;
 
-    // ─── construct ───────────────────────────────────────────────────────────
+    // ─── construct / initialize ──────────────────────────────────────────────
 
-    constructor(InitParams memory p) {
+    /// @notice Locks the implementation contract so only clones can be initialized.
+    constructor() {
+        _disableInitializers();
+    }
+
+    /// @inheritdoc IAgentVault
+    function initialize(InitParams memory p) external override initializer {
         if (
             p.agentToken == address(0) ||
             p.founderVault == address(0) ||

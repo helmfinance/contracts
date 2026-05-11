@@ -19,6 +19,18 @@ interface IAgentToken is IERC20 {
     function vault() external view returns (address);
     function agentId() external view returns (uint256);
 
+    /// @notice Initialize an EIP-1167 clone of this token. Replaces the constructor.
+    /// @param name_ Token name (e.g. "Agent 1 Shares").
+    /// @param symbol_ Token symbol (e.g. "AGT-1").
+    /// @param vault_ Address of the AgentVault that may mint/burn.
+    /// @param agentId_ The agent identifier.
+    function initialize(
+        string memory name_,
+        string memory symbol_,
+        address vault_,
+        uint256 agentId_
+    ) external;
+
     /// @notice Mint shares. Restricted to vault.
     function mint(address to, uint256 amount) external;
 

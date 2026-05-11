@@ -2,6 +2,7 @@
 pragma solidity ^0.8.24;
 
 import "forge-std/Test.sol";
+import {Clones} from "@openzeppelin/contracts/proxy/Clones.sol";
 import "../src/yield/YieldHarvester.sol";
 import "../src/core/AgentVault.sol";
 import "../src/core/AgentToken.sol";
@@ -32,16 +33,18 @@ contract YieldHarvesterTest is Test {
         // Deploy harvester
         harvester = new YieldHarvester(executor, address(mockRegistry), address(usdc));
 
-        // Predict vault address for AgentToken
-        uint64 nonce = vm.getNonce(address(this));
-        address predictedVault = vm.computeCreateAddress(address(this), nonce + 1);
+        // Clone token and vault, then initialize — avoids predicted-address dance.
+        AgentToken tokenImpl = new AgentToken();
+        AgentVault vaultImpl = new AgentVault();
+        agentToken = AgentToken(Clones.clone(address(tokenImpl)));
+        vault = AgentVault(Clones.clone(address(vaultImpl)));
 
-        agentToken = new AgentToken("Agent 1", "AGT-1", predictedVault, AGENT_ID);
+        agentToken.initialize("Agent 1", "AGT-1", address(vault), AGENT_ID);
 
-        AgentVault.AssetEntry[] memory ea = new AgentVault.AssetEntry[](0);
-        AgentVault.WeightConstraint[] memory ew = new AgentVault.WeightConstraint[](0);
+        IAgentVault.AssetEntry[] memory ea = new IAgentVault.AssetEntry[](0);
+        IAgentVault.WeightConstraint[] memory ew = new IAgentVault.WeightConstraint[](0);
 
-        vault = new AgentVault(AgentVault.InitParams({
+        vault.initialize(IAgentVault.InitParams({
             agentId: AGENT_ID,
             mandateHash: keccak256("m"),
             mandateURI: "ipfs://m",
@@ -59,7 +62,6 @@ contract YieldHarvesterTest is Test {
             weightConstraints: ew,
             seniorWindowDuration: 0
         }));
-        require(address(vault) == predictedVault, "vault addr");
 
         // Register in mock registry
         mockRegistry.setDeployment(AGENT_ID, IHelmRegistry.AgentDeployment({

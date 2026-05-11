@@ -33,6 +33,12 @@ contract HelmRegistryTest is Test {
         // Set mint fee to 0 for simpler test math
         treasury.setFeeRate(IPlatformTreasury.FeeKind.Mint, 0);
 
+        // Implementation deployments (clone targets) — constructors just call
+        // _disableInitializers() so these are tiny.
+        address tokenImpl = address(new AgentToken());
+        address vaultImpl = address(new AgentVault());
+        address fvImpl    = address(new FounderVault());
+
         registry = new HelmRegistry(HelmRegistry.RegistryParams({
             admin: admin,
             usdc: address(usdc),
@@ -42,6 +48,9 @@ contract HelmRegistryTest is Test {
             pythAdapter: pythAdapter,
             executor: executor,
             distributor: distributor,
+            agentTokenImpl: tokenImpl,
+            agentVaultImpl: vaultImpl,
+            founderVaultImpl: fvImpl,
             defaultLockupDays: 180,
             defaultSubordinationBps: 5000,
             defaultFounderShareBps: 2000
