@@ -576,11 +576,12 @@ contract IntegrationTest is Test {
         assertEq(uint8(v.phase()), uint8(IAgentVault.Phase.PublicLaunch));
     }
 
-    /// SCENARIO: Wind-down — verify the senior/junior split executed by settle().
-    /// With Bug 2 still open, settle() pays pro-rata; this test will be tightened
-    /// to assert senior priority once Bug 2 is fixed.
+    /// SCENARIO: Wind-down with senior priority. After triggerWindDown
+    /// snapshots the NAV-per-share, a *further* loss is incurred before
+    /// settle (additional Pyth drop between trigger and liquidation). The
+    /// junior tranche (founder) must absorb the post-trigger loss first;
+    /// senior holders are paid up to their pre-windDown claim.
     function test_windDown_seniorPriority() public {
-        // Mandate: sNVDA so a Pyth move drives the loss.
         IAgentVault.AssetEntry[] memory assets = new IAgentVault.AssetEntry[](1);
         assets[0] = IAgentVault.AssetEntry({asset: address(sNVDA), kind: IAgentVault.AssetKind.Synthetic});
         IAgentVault.WeightConstraint[] memory weights = new IAgentVault.WeightConstraint[](1);
@@ -595,44 +596,59 @@ contract IntegrationTest is Test {
         registry.advanceToPublic(agentId);
         _setPythPrice(NVDA_FEED, 21_486_000);
 
-        // Senior holders deposit. Each is 2× the founder seed so the senior
-        // tranche is ~80% of supply (founder ~20%).
+        // Senior holders deposit (each 2× founder seed ⇒ senior ≈ 80% of supply).
         _mintShares(v, alice, 2_000e6);
         _mintShares(v, bob,   2_000e6);
 
-        // Backend rebalances some cash into sNVDA so a Pyth move actually
-        // affects NAV. Keep position modest so cash covers the seniorPay.
+        // Build a meaningful sNVDA position so post-trigger slippage matters.
+        // 5 sNVDA at $214.86 ≈ $1074 (~21% of NAV).
         IAgentVault.Position[] memory pos = new IAgentVault.Position[](1);
-        pos[0] = IAgentVault.Position({asset: address(sNVDA), amount: 2e18}); // ≈ $429.72
+        pos[0] = IAgentVault.Position({asset: address(sNVDA), amount: 5e18});
         vm.prank(backend1);
         v.executeRebalance(pos, "");
 
-        // Halve NVDA → vault NAV drops.
+        // First loss event — halve NVDA. This is reflected in the NAV
+        // snapshot that triggerWindDown will take.
         _setPythPrice(NVDA_FEED, 10_743_000); // ≈ $107.43
 
-        // Founder triggers wind-down via FounderVault.
         vm.prank(founder1);
         fv.triggerWindDown("nav collapse");
         assertEq(uint8(v.phase()), uint8(IAgentVault.Phase.WindDown));
+        assertGt(v.preLossNavPerShare(), 0);
 
-        // Liquidate the sNVDA position.
+        // SECOND loss after trigger — another 50% drop. The junior tranche
+        // must absorb this; senior's claim is locked at the snapshot.
+        _setPythPrice(NVDA_FEED, 5_371_500); // ≈ $53.71
+
         v.progressWindDown();
-        _setPythPrice(NVDA_FEED, 10_743_000);
+        _setPythPrice(NVDA_FEED, 5_371_500);
 
-        // Warp past the 90d senior window and settle.
         vm.warp(block.timestamp + 91 days);
-        _setPythPrice(NVDA_FEED, 10_743_000);
+        _setPythPrice(NVDA_FEED, 5_371_500);
         v.settle();
         assertEq(uint8(v.phase()), uint8(IAgentVault.Phase.Settled));
+
+        // Per-share assertion: senior receives strictly more per AGT than junior.
+        AgentToken tk = AgentToken(d.token);
+        uint256 founderShares = tk.balanceOf(address(fv));
+        uint256 supply = tk.totalSupply() + (alice == address(0) ? 0 : 0); // settle didn't burn
+        // After settle: supply is unchanged (settle doesn't burn). Senior
+        // shares = total supply − founder shares.
+        uint256 seniorShares = supply - founderShares;
 
         (,,,,, uint256 seniorPay, uint256 juniorPay) = v.windDown();
         assertGt(seniorPay, 0);
 
-        // CURRENT BEHAVIOUR: pro-rata split. juniorPay > 0 even though seniors
-        // are not made whole. Bug 2 fix will make juniorPay ≈ 0.
-        assertGt(juniorPay, 0);
-        // Senior should still receive *more* in absolute terms than junior.
-        assertGt(seniorPay, juniorPay);
+        // Senior per-share strictly greater than junior per-share. Scale both
+        // by SHARE_SCALE to use integer math.
+        uint256 seniorPerShare = (seniorPay * 1e18) / seniorShares;
+        uint256 juniorPerShare = (juniorPay * 1e18) / founderShares;
+        assertGt(seniorPerShare, juniorPerShare);
+
+        // Senior per-share ≈ preLossNavPerShare (snapshot honored, modulo
+        // cash-cap when liquidation cash isn't enough). Allow a small
+        // tolerance for the rebalance fee already paid before trigger.
+        assertApproxEqRel(seniorPerShare, v.preLossNavPerShare(), 0.01e18);
     }
 
     /// SCENARIO: Rebalance must obey the mandate's per-asset weight bounds.

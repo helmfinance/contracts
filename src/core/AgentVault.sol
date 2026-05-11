@@ -94,6 +94,12 @@ contract AgentVault is IAgentVault, Initializable, ReentrancyGuard {
 
     uint256 internal _liquidationCursor;
 
+    /// @notice NAV-per-share at the moment {triggerWindDown} fired, scaled by
+    ///         1e18. Locks in the senior tranche's pre-windDown claim so that
+    ///         further losses incurred during liquidation are absorbed by the
+    ///         junior tranche (FounderVault) first.
+    uint256 public preLossNavPerShare;
+
     // ─── construct / initialize ──────────────────────────────────────────────
 
     /// @notice Locks the implementation contract so only clones can be initialized.
@@ -432,7 +438,9 @@ contract AgentVault is IAgentVault, Initializable, ReentrancyGuard {
 
     /// @notice Move into wind-down. Callable by the FounderVault (auto-trigger
     ///         on subordination breach), the registry (slash), or the
-    ///         RedemptionQueue (queue-driven subordination signal).
+    ///         RedemptionQueue (queue-driven subordination signal). Snapshots
+    ///         the NAV-per-share at this moment so {settle} can honour senior
+    ///         priority at the pre-windDown valuation.
     function triggerWindDown(string calldata reason) external override {
         if (
             msg.sender != address(founderVault) &&
@@ -443,6 +451,10 @@ contract AgentVault is IAgentVault, Initializable, ReentrancyGuard {
 
         Phase old = phase;
         phase = Phase.WindDown;
+
+        uint256 supply = totalSupply();
+        preLossNavPerShare = supply == 0 ? 0 : (totalNAV() * SHARE_SCALE) / supply;
+
         windDown = WindDown({
             active: true,
             settled: false,
@@ -511,9 +523,12 @@ contract AgentVault is IAgentVault, Initializable, ReentrancyGuard {
         } else if (seniorShares == 0) {
             juniorPay = cash;
         } else {
-            // Senior is paid pro-rata of full cash; junior absorbs the residual.
-            seniorPay = cash * seniorShares / supply;
-            if (seniorPay > cash) seniorPay = cash;
+            // Senior priority: each senior share is owed `preLossNavPerShare`
+            // (snapshotted at trigger time). Senior is paid up to that claim,
+            // junior (FounderVault) absorbs the residual — including any
+            // further losses incurred between trigger and settle.
+            uint256 seniorOwed = (seniorShares * preLossNavPerShare) / SHARE_SCALE;
+            seniorPay = seniorOwed > cash ? cash : seniorOwed;
             juniorPay = cash - seniorPay;
         }
 
