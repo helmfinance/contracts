@@ -318,9 +318,11 @@ contract IntegrationTest is Test {
         // Re-stamp Pyth prices — 30 days exceeds the 96h staleness window.
         _setPythPrice(NVDA_FEED, 21_486_000);
 
-        // 3) Alice deposits 100 USDC at par NAV → 99.5e18 shares.
-        uint256 aliceShares = _mintShares(v, alice, 100e6);
-        assertEq(aliceShares, 99_500_000 * 1e12);
+        // 3) Alice deposits 2000 USDC at par NAV → 1990e18 shares.
+        //    Deposits are 2× the founder seed so founder's effective stake
+        //    stays below the 40% subordination threshold after redemption.
+        uint256 aliceShares = _mintShares(v, alice, 2_000e6);
+        assertEq(aliceShares, 1990e18);
 
         // 4) Backend rebalances: buy 2 sNVDA (≈ $429.72 at $214.86).
         IAgentVault.Position[] memory targets = new IAgentVault.Position[](1);
@@ -337,8 +339,8 @@ contract IntegrationTest is Test {
         // Gain on 2 sNVDA = 2 * ($257.832 − $214.86) ≈ $85.944. Allow ±$1 rounding.
         assertApproxEqAbs(navAfterPump - navBeforePump, 85_944_000, 1_000_000);
 
-        // 6) Bob deposits 100 USDC at higher NAV/share → he gets fewer shares than Alice.
-        uint256 bobShares = _mintShares(v, bob, 100e6);
+        // 6) Bob deposits 2000 USDC at higher NAV/share → he gets fewer shares than Alice.
+        uint256 bobShares = _mintShares(v, bob, 2_000e6);
         assertLt(bobShares, aliceShares);
 
         // 7) Alice requests 30-day redemption.
@@ -357,11 +359,13 @@ contract IntegrationTest is Test {
         uint256 aliceUsdcBefore = usdc.balanceOf(alice);
         uint256 usdcOut = queue.claim(reqId);
         assertEq(usdc.balanceOf(alice) - aliceUsdcBefore, usdcOut);
-        // After the NVDA gain alice nets >99.5 USDC even after 0.5% redeem fee.
-        assertGt(usdcOut, 99_500_000);
+        // After the NVDA gain alice nets >1990 USDC even after 0.5% redeem fee.
+        assertGt(usdcOut, 1990e6);
 
         // 9) Sanity: total supply == FV balance + Bob's balance (alice burned).
         assertEq(tk.totalSupply(), tk.balanceOf(address(fv)) + tk.balanceOf(bob));
+        // Founder bps after alice's redemption: 995 / (995 + ~1935) ≈ 34% — under
+        // the 40% threshold, so no auto-windDown triggered.
         assertEq(uint8(v.phase()), uint8(IAgentVault.Phase.PublicLaunch));
     }
 
@@ -531,8 +535,8 @@ contract IntegrationTest is Test {
     }
 
     /// SCENARIO: Many user redemptions push the founder's effective share of
-    /// total supply over the subordination threshold. Verifies what the system
-    /// does today (no auto-trigger). Bug 1's fix will tighten this assertion.
+    /// total supply over the subordination threshold. RedemptionQueue.claim
+    /// must auto-trigger wind-down on the breaching redemption.
     function test_redemptionQueue_subordinationAutoTrigger() public {
         uint256 agentId = _registerAgent(founder1, keccak256("sub-mandate"), 1_000e6);
         IHelmRegistry.AgentDeployment memory d = registry.deploymentOf(agentId);
@@ -562,18 +566,16 @@ contract IntegrationTest is Test {
         queue.claim(req1);
         assertLt(founderShares * 10_000 / tk.totalSupply(), 4000);
 
-        // Alice redeems more, pushing founder past 40%.
+        // Alice redeems more, pushing founder past 40%. The breaching claim
+        // must auto-trigger wind-down on the agent's vault.
+        assertEq(uint8(v.phase()), uint8(IAgentVault.Phase.PublicLaunch));
         vm.startPrank(alice);
         uint256 req2 = queue.requestRedeem(agentId, aliceShares / 2 - aliceShares / 5,
             IRedemptionQueue.LockupTier.Instant);
         vm.stopPrank();
         queue.claim(req2);
         assertGt(founderShares * 10_000 / tk.totalSupply(), 4000);
-
-        // // TODO: bug discovered — vault.phase() *should* be WindDown here per
-        // the user's spec, but no auto-trigger exists. We assert the current
-        // behaviour (still PublicLaunch) so the test surfaces the gap.
-        assertEq(uint8(v.phase()), uint8(IAgentVault.Phase.PublicLaunch));
+        assertEq(uint8(v.phase()), uint8(IAgentVault.Phase.WindDown));
     }
 
     /// SCENARIO: Wind-down with senior priority. After triggerWindDown

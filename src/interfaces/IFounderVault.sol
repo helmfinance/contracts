@@ -28,6 +28,7 @@ interface IFounderVault {
     function lockupEndsAt() external view returns (uint64);
     function totalSharesHeld() external view returns (uint256);
     function carryBalance() external view returns (uint256);
+    function subordinationThresholdBps() external view returns (uint16);
     function isSubordinationActive() external view returns (bool);
 
     /// @notice Initialize an EIP-1167 clone of this founder vault. Replaces the constructor.

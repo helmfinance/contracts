@@ -51,7 +51,7 @@ contract FounderVault is IFounderVault, Initializable, ReentrancyGuard {
     uint64 public override lockupEndsAt;
 
     /// @notice Subordination threshold in basis points.
-    uint16 public subordinationThresholdBps;
+    uint16 public override subordinationThresholdBps;
 
     /// @notice Founder share percentage in basis points.
     uint16 public founderShareBps;

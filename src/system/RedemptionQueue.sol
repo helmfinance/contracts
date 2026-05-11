@@ -8,6 +8,7 @@ import {ReentrancyGuard} from "@openzeppelin/contracts/utils/ReentrancyGuard.sol
 import {IRedemptionQueue} from "../interfaces/IRedemptionQueue.sol";
 import {IAgentVault} from "../interfaces/IAgentVault.sol";
 import {IAgentToken} from "../interfaces/IAgentToken.sol";
+import {IFounderVault} from "../interfaces/IFounderVault.sol";
 import {IHelmRegistry} from "../interfaces/IHelmRegistry.sol";
 
 /// @title RedemptionQueue
@@ -35,6 +36,10 @@ contract RedemptionQueue is IRedemptionQueue, ReentrancyGuard {
 
     /// @dev agentId → agentToken address (cached)
     mapping(uint256 => address) public tokenOf;
+
+    /// @dev agentId → FounderVault address (cached). Used to read junior-tranche
+    ///      subordination state when checking auto-windDown after a claim.
+    mapping(uint256 => address) public founderVaultOf;
 
     mapping(uint256 => Request) internal _requests;
     uint256 internal _nextRequestId;
@@ -133,6 +138,10 @@ contract RedemptionQueue is IRedemptionQueue, ReentrancyGuard {
         IERC20(usdcAddr).safeTransfer(r.holder, usdcOut);
 
         emit RedeemClaimed(requestId, usdcOut);
+
+        // Burning user shares can push the founder's effective stake above the
+        // subordination threshold. If so, auto-trigger wind-down.
+        _checkSubordinationAndTrigger(r.agentId);
     }
 
     /// @inheritdoc IRedemptionQueue
@@ -195,6 +204,28 @@ contract RedemptionQueue is IRedemptionQueue, ReentrancyGuard {
             IHelmRegistry.AgentDeployment memory d = registry.deploymentOf(agentId);
             vaultOf[agentId] = d.vault;
             tokenOf[agentId] = d.token;
+            founderVaultOf[agentId] = d.founderVault;
+        }
+    }
+
+    /// @dev Called by {claim} after shares are burned. If the founder's
+    ///      effective share of remaining supply now meets or exceeds the
+    ///      FounderVault's subordination threshold, auto-trigger wind-down
+    ///      on the agent's vault.
+    function _checkSubordinationAndTrigger(uint256 agentId) internal {
+        address vault_ = vaultOf[agentId];
+        address fv_    = founderVaultOf[agentId];
+        if (fv_ == address(0)) return;
+        if (IAgentVault(vault_).phase() == IAgentVault.Phase.WindDown) return;
+
+        uint256 supply = IERC20(tokenOf[agentId]).totalSupply();
+        if (supply == 0) return;
+
+        uint256 founderHeld = IFounderVault(fv_).totalSharesHeld();
+        uint256 founderBps = (founderHeld * 10_000) / supply;
+        uint16  threshold  = IFounderVault(fv_).subordinationThresholdBps();
+        if (founderBps >= threshold) {
+            IAgentVault(vault_).triggerWindDown("subordination_breach_via_redemption");
         }
     }
 }
