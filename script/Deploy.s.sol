@@ -19,14 +19,20 @@ import {SyntheticAsset} from "../src/adapters/SyntheticAsset.sol";
 import {MantleMETHAdapter} from "../src/adapters/MantleMETHAdapter.sol";
 import {OndoUSDYAdapter} from "../src/adapters/OndoUSDYAdapter.sol";
 
+import {MockERC20} from "../test/mocks/MockERC20.sol";
+
 /// @title Deploy
-/// @notice Full-system deploy script for Helm on Mantle Sepolia (chainId 5003).
-///         Writes all addresses to `./deployments/<chainId>.json` for the BE/FE
-///         ABI sync, and prints them to stdout.
-/// @dev    Run with:
-///         forge script script/Deploy.s.sol --rpc-url $MANTLE_SEPOLIA_RPC --broadcast
-///
-///         Required env: DEPLOYER_PRIVATE_KEY, USDC_ADDRESS.
+/// @notice Full-system deploy script for Helm. Supports two targets:
+///         - Local anvil (chainId 31337): broadcasts with the default sender,
+///           deploys a fresh MockERC20 USDC. No env vars required.
+///         - Mantle Sepolia (chainId 5003): broadcasts with DEPLOYER_PRIVATE_KEY,
+///           uses USDC_ADDRESS from env.
+///         Writes all addresses to `./deployments/<chainId>.json` and prints
+///         them to stdout.
+/// @dev    Mantle Sepolia:
+///           forge script script/Deploy.s.sol --rpc-url $MANTLE_SEPOLIA_RPC --broadcast
+///         Anvil dry-run:
+///           forge script script/Deploy.s.sol --rpc-url http://localhost:8545 --broadcast
 contract Deploy is Script {
     // ─── Pyth Stable channel feed IDs ───────────────────────────────
     bytes32 constant NVDA_FEED = 0xb1073854ed24cbc755dc527418f52b7d271f6cc967bbf8d8129112b18860a593;
@@ -66,14 +72,29 @@ contract Deploy is Script {
     }
 
     function run() external returns (Deployment memory d) {
-        uint256 deployerKey = vm.envUint("DEPLOYER_PRIVATE_KEY");
-        address deployer = vm.addr(deployerKey);
-        address usdc = vm.envAddress("USDC_ADDRESS");
+        uint256 chainId = block.chainid;
+        address usdc;
+        address deployer;
 
+        if (chainId == 31337) {
+            // Local anvil: broadcast as the default sender, deploy a fresh
+            // mintable USDC *inside* the broadcast so subsequent txs that
+            // reference it land against a real on-chain contract.
+            vm.startBroadcast();
+            usdc = address(new MockERC20("USD Coin", "USDC", 6));
+            deployer = tx.origin;
+        } else if (chainId == 5003) {
+            uint256 deployerKey = vm.envUint("DEPLOYER_PRIVATE_KEY");
+            deployer = vm.addr(deployerKey);
+            usdc = vm.envAddress("USDC_ADDRESS");
+            vm.startBroadcast(deployerKey);
+        } else {
+            revert("Unsupported chain: use anvil (31337) or Mantle Sepolia (5003)");
+        }
+
+        console2.log("Chain ID:", chainId);
         console2.log("Deployer:", deployer);
         console2.log("USDC:    ", usdc);
-
-        vm.startBroadcast(deployerKey);
 
         // 1. Platform treasury (deployer is initial admin).
         d.treasury = address(new PlatformTreasury(usdc, deployer));
