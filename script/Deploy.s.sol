@@ -10,6 +10,7 @@ import {FounderVault} from "../src/core/FounderVault.sol";
 import {HelmRegistry} from "../src/system/HelmRegistry.sol";
 import {PlatformTreasury} from "../src/system/PlatformTreasury.sol";
 import {RedemptionQueue} from "../src/system/RedemptionQueue.sol";
+import {AgentNFT} from "../src/system/AgentNFT.sol";
 
 import {YieldHarvester} from "../src/yield/YieldHarvester.sol";
 import {DividendDistributor} from "../src/yield/DividendDistributor.sol";
@@ -53,6 +54,7 @@ contract Deploy is Script {
         address usdc;
         // singletons / system
         address registry;
+        address agentNFT;
         address treasury;
         address harvester;
         address distributor;
@@ -132,17 +134,18 @@ contract Deploy is Script {
         d.agentVaultImpl   = address(new AgentVault());
         d.founderVaultImpl = address(new FounderVault());
 
-        // 6. HelmRegistry + YieldHarvester + DividendDistributor + RedemptionQueue.
-        //    They are mutually dependent — the registry holds the queue, harvester
-        //    and distributor as immutables, but each of those holds the registry
-        //    as its immutable too. We break the cycle by predicting the registry's
-        //    create address, deploying the three dependents with that prediction,
-        //    then deploying the registry itself.
+        // 6. AgentNFT + YieldHarvester + DividendDistributor + RedemptionQueue + HelmRegistry.
+        //    They form a mutual-dependency cycle: each holds the registry as
+        //    an immutable, and the registry holds each of them. We resolve
+        //    the cycle by predicting the registry's CREATE address, deploying
+        //    the four dependents with that prediction, then deploying the
+        //    registry itself.
         uint64 nonce = vm.getNonce(deployer);
-        address predictedRegistry = vm.computeCreateAddress(deployer, nonce + 3);
+        address predictedRegistry = vm.computeCreateAddress(deployer, nonce + 4);
 
-        d.harvester   = address(new YieldHarvester(deployer, predictedRegistry, usdc));
-        d.distributor = address(new DividendDistributor(d.harvester, predictedRegistry, usdc));
+        d.agentNFT       = address(new AgentNFT(predictedRegistry, deployer));
+        d.harvester      = address(new YieldHarvester(deployer, predictedRegistry, usdc));
+        d.distributor    = address(new DividendDistributor(d.harvester, predictedRegistry, usdc));
         d.redemptionQueue = address(new RedemptionQueue(deployer, predictedRegistry));
         d.registry = address(new HelmRegistry(HelmRegistry.RegistryParams({
             admin:                   deployer,
@@ -153,6 +156,7 @@ contract Deploy is Script {
             pythAdapter:             d.pythAdapter,
             executor:                deployer,
             distributor:             d.distributor,
+            agentNFT:                d.agentNFT,
             agentTokenImpl:          d.agentTokenImpl,
             agentVaultImpl:          d.agentVaultImpl,
             founderVaultImpl:        d.founderVaultImpl,
@@ -161,6 +165,7 @@ contract Deploy is Script {
             defaultFounderShareBps:  2000
         })));
         require(d.registry == predictedRegistry, "registry addr mismatch");
+        require(AgentNFT(d.agentNFT).registry() == d.registry, "agentNFT registry mismatch");
 
         vm.stopBroadcast();
 
@@ -186,6 +191,7 @@ contract Deploy is Script {
         string memory json = "deployment";
         vm.serializeAddress(json, "usdc",             d.usdc);
         vm.serializeAddress(json, "registry",         d.registry);
+        vm.serializeAddress(json, "agentNFT",         d.agentNFT);
         vm.serializeAddress(json, "treasury",         d.treasury);
         vm.serializeAddress(json, "harvester",        d.harvester);
         vm.serializeAddress(json, "distributor",      d.distributor);
@@ -215,6 +221,7 @@ contract Deploy is Script {
         console2.log("============================================================");
         console2.log("usdc:            ", d.usdc);
         console2.log("registry:        ", d.registry);
+        console2.log("agentNFT:        ", d.agentNFT);
         console2.log("treasury:        ", d.treasury);
         console2.log("harvester:       ", d.harvester);
         console2.log("distributor:     ", d.distributor);
