@@ -51,6 +51,7 @@ contract AgentVault is IAgentVault, Initializable, ReentrancyGuard {
 
     error InsufficientShares();
     error MintsDisabled();
+    error OnlyFounderDuringIncubation();
     error MandateBreach(address asset, uint256 actualBps, uint256 minBps, uint256 maxBps);
     error AssetNotWhitelisted(address asset);
     error WindDownActive();
@@ -170,7 +171,16 @@ contract AgentVault is IAgentVault, Initializable, ReentrancyGuard {
     }
     modifier mintsAllowed() {
         if (windDown.active) revert MintsDisabled();
-        if (phase != Phase.PublicLaunch && phase != Phase.Incubation) revert WrongPhase();
+        if (phase == Phase.Incubation) {
+            // During the vetting window only the founder (or the registry,
+            // which routes the founder's seed deposit during registerAgent)
+            // may deposit. Public capital is gated until PublicLaunch.
+            if (msg.sender != founderVault.founder() && msg.sender != registry) {
+                revert OnlyFounderDuringIncubation();
+            }
+        } else if (phase != Phase.PublicLaunch) {
+            revert WrongPhase();
+        }
         _;
     }
     modifier notWindDown() {

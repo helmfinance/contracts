@@ -706,12 +706,6 @@ contract IntegrationTest is Test {
     }
 
     /// SCENARIO: Strict phase state-machine enforcement via the registry.
-    ///
-    /// // TODO: bug discovered — the user's spec says "mints disabled until
-    /// PublicLaunch" but AgentVault.mintsAllowed permits mints during *both*
-    /// Incubation and PublicLaunch (and there is no caller check restricting
-    /// Incubation mints to the founder). We test the *current* behaviour and
-    /// flag the gap.
     function test_phase_transitions_enforced() public {
         uint256 agentId = _registerAgent(founder1, keccak256("phase-mandate"), 1_000e6);
         IHelmRegistry.AgentDeployment memory d = registry.deploymentOf(agentId);
@@ -720,14 +714,22 @@ contract IntegrationTest is Test {
         // 1) Just-registered → Incubation.
         assertEq(uint8(v.phase()), uint8(IAgentVault.Phase.Incubation));
 
-        // 2) Per current code, Alice CAN deposit during Incubation (no caller
-        //    restriction). Document the spec deviation.
+        // 2) Alice (non-founder) CANNOT deposit during Incubation.
         _giveUsdc(alice, 50e6);
         vm.startPrank(alice);
         usdc.approve(address(v), 50e6);
+        vm.expectRevert(AgentVault.OnlyFounderDuringIncubation.selector);
         v.deposit(50e6, alice);
         vm.stopPrank();
-        assertGt(AgentToken(d.token).balanceOf(alice), 0);
+        assertEq(AgentToken(d.token).balanceOf(alice), 0);
+
+        // 2b) Founder CAN top up during Incubation.
+        _giveUsdc(founder1, 50e6);
+        vm.startPrank(founder1);
+        usdc.approve(address(v), 50e6);
+        v.deposit(50e6, founder1);
+        vm.stopPrank();
+        assertGt(AgentToken(d.token).balanceOf(founder1), 0);
 
         // 3) advanceToPublic before 30d reverts.
         vm.expectRevert();
@@ -747,8 +749,9 @@ contract IntegrationTest is Test {
         vm.expectRevert(HelmRegistry.AlreadyAdvanced.selector);
         registry.advanceToPublic(agentId);
 
-        // 7) Public mint works (Bob).
-        _mintShares(v, bob, 100e6);
+        // 7) Public mint works (Alice — previously blocked).
+        _mintShares(v, alice, 100e6);
+        assertGt(AgentToken(d.token).balanceOf(alice), 0);
 
         // 8) Trigger wind-down via FounderVault. registry path: only the
         //    real registry, founder vault or queue may call. founderVault
