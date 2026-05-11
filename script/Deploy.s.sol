@@ -49,6 +49,8 @@ contract Deploy is Script {
 
     /// @notice Output of a full deployment.
     struct Deployment {
+        // base token (real USDC, or a freshly-deployed MockUSDC)
+        address usdc;
         // singletons / system
         address registry;
         address treasury;
@@ -86,11 +88,23 @@ contract Deploy is Script {
         } else if (chainId == 5003) {
             uint256 deployerKey = vm.envUint("DEPLOYER_PRIVATE_KEY");
             deployer = vm.addr(deployerKey);
-            usdc = vm.envAddress("USDC_ADDRESS");
+            // USDC_ADDRESS is optional on Sepolia: when unset, deploy a fresh
+            // MockUSDC and log a warning. Use a real USDC contract for prod.
+            address usdcEnv = vm.envOr("USDC_ADDRESS", address(0));
             vm.startBroadcast(deployerKey);
+            if (usdcEnv == address(0)) {
+                console2.log(
+                    "Warning: USDC_ADDRESS not set, deploying MockUSDC for hackathon. Use real USDC contract for production."
+                );
+                usdc = address(new MockERC20("USD Coin", "USDC", 6));
+            } else {
+                usdc = usdcEnv;
+            }
         } else {
             revert("Unsupported chain: use anvil (31337) or Mantle Sepolia (5003)");
         }
+
+        d.usdc = usdc;
 
         console2.log("Chain ID:", chainId);
         console2.log("Deployer:", deployer);
@@ -170,6 +184,7 @@ contract Deploy is Script {
 
     function _writeDeployment(Deployment memory d) internal {
         string memory json = "deployment";
+        vm.serializeAddress(json, "usdc",             d.usdc);
         vm.serializeAddress(json, "registry",         d.registry);
         vm.serializeAddress(json, "treasury",         d.treasury);
         vm.serializeAddress(json, "harvester",        d.harvester);
@@ -198,6 +213,7 @@ contract Deploy is Script {
         console2.log("============================================================");
         console2.log("Helm deployment");
         console2.log("============================================================");
+        console2.log("usdc:            ", d.usdc);
         console2.log("registry:        ", d.registry);
         console2.log("treasury:        ", d.treasury);
         console2.log("harvester:       ", d.harvester);
