@@ -69,7 +69,9 @@ contract HelmRegistryTest is Test {
         usdc.mint(founder, seed);
         vm.startPrank(founder);
         usdc.approve(address(registry), seed);
-        agentId = registry.registerAgent(hash, uri, seed);
+        IAgentVault.AssetEntry[] memory emptyAssets = new IAgentVault.AssetEntry[](0);
+        IAgentVault.WeightConstraint[] memory emptyWc = new IAgentVault.WeightConstraint[](0);
+        agentId = registry.registerAgent(hash, uri, seed, emptyAssets, emptyWc);
         vm.stopPrank();
     }
 
@@ -189,7 +191,7 @@ contract HelmRegistryTest is Test {
         vm.startPrank(founder);
         usdc.approve(address(registry), SEED);
         vm.expectRevert(abi.encodeWithSelector(HelmRegistry.MandateAlreadyUsed.selector, MANDATE_HASH));
-        registry.registerAgent(MANDATE_HASH, MANDATE_URI, SEED);
+        registry.registerAgent(MANDATE_HASH, MANDATE_URI, SEED, _emptyAssets(), _emptyWc());
         vm.stopPrank();
     }
 
@@ -202,7 +204,7 @@ contract HelmRegistryTest is Test {
         vm.startPrank(founder);
         usdc.approve(address(registry), SEED);
         vm.expectRevert(IHelmRegistry.MandateInvalid.selector);
-        registry.registerAgent(bytes32(0), MANDATE_URI, SEED);
+        registry.registerAgent(bytes32(0), MANDATE_URI, SEED, _emptyAssets(), _emptyWc());
         vm.stopPrank();
     }
 
@@ -211,7 +213,7 @@ contract HelmRegistryTest is Test {
         vm.startPrank(founder);
         usdc.approve(address(registry), SEED);
         vm.expectRevert(IHelmRegistry.MandateInvalid.selector);
-        registry.registerAgent(MANDATE_HASH, "", SEED);
+        registry.registerAgent(MANDATE_HASH, "", SEED, _emptyAssets(), _emptyWc());
         vm.stopPrank();
     }
 
@@ -225,8 +227,15 @@ contract HelmRegistryTest is Test {
         vm.startPrank(founder);
         usdc.approve(address(registry), lowSeed);
         vm.expectRevert(IHelmRegistry.InsufficientSeed.selector);
-        registry.registerAgent(MANDATE_HASH, MANDATE_URI, lowSeed);
+        registry.registerAgent(MANDATE_HASH, MANDATE_URI, lowSeed, _emptyAssets(), _emptyWc());
         vm.stopPrank();
+    }
+
+    function _emptyAssets() internal pure returns (IAgentVault.AssetEntry[] memory) {
+        return new IAgentVault.AssetEntry[](0);
+    }
+    function _emptyWc() internal pure returns (IAgentVault.WeightConstraint[] memory) {
+        return new IAgentVault.WeightConstraint[](0);
     }
 
     // ---------------------------------------------------------------

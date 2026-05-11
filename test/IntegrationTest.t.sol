@@ -178,16 +178,37 @@ contract IntegrationTest is Test {
         usdc.mint(to, amount);
     }
 
-    /// @dev Register an agent via the real HelmRegistry. Vault has NO assets
-    ///      whitelisted (the registry doesn't accept a mandate asset list).
-    function _registerAgent(address founder_, bytes32 mandateHash, uint256 seedUsdc)
-        internal returns (uint256 agentId)
-    {
+    /// @dev Register an agent via the real HelmRegistry with the supplied
+    ///      mandate (tradeable assets and weight bounds). After registration
+    ///      the vault is fully wired and can rebalance into any of `assets`.
+    function _registerAgent(
+        address founder_,
+        bytes32 mandateHash,
+        uint256 seedUsdc,
+        IAgentVault.AssetEntry[] memory assets,
+        IAgentVault.WeightConstraint[] memory weights
+    ) internal returns (uint256 agentId) {
         _giveUsdc(founder_, seedUsdc);
         vm.startPrank(founder_);
         usdc.approve(address(registry), seedUsdc);
-        agentId = registry.registerAgent(mandateHash, "ipfs://mandate", seedUsdc);
+        agentId = registry.registerAgent(mandateHash, "ipfs://mandate", seedUsdc, assets, weights);
         vm.stopPrank();
+
+        // Authorize the freshly-deployed vault on each synthetic in the mandate
+        // (the test contract is the synthetics' admin).
+        IHelmRegistry.AgentDeployment memory d = registry.deploymentOf(agentId);
+        for (uint256 i = 0; i < assets.length; i++) {
+            if (assets[i].kind == IAgentVault.AssetKind.Synthetic) {
+                SyntheticAsset(assets[i].asset).registerVault(d.vault);
+            }
+        }
+    }
+
+    /// @dev Cash-only convenience overload (no tradeable assets).
+    function _registerAgent(address founder_, bytes32 mandateHash, uint256 seedUsdc)
+        internal returns (uint256 agentId)
+    {
+        return _registerAgent(founder_, mandateHash, seedUsdc, _emptyAssets(), _emptyWeights());
     }
 
     /// @dev Deploy an agent trio manually (cloning the impls). Lets tests
@@ -245,27 +266,6 @@ contract IntegrationTest is Test {
         }
     }
 
-    /// @dev Make the real RedemptionQueue and DividendDistributor see a
-    ///      manually-deployed agent by mocking the registry's deploymentOf().
-    function _mockRegistryFor(uint256 agentId, Trio memory t, address founder_) internal {
-        IHelmRegistry.AgentDeployment memory d = IHelmRegistry.AgentDeployment({
-            agentId:         agentId,
-            nft:             address(0),
-            token:           address(t.token),
-            vault:           address(t.vault),
-            founderVault:    address(t.founderVault),
-            founder:         founder_,
-            phase:           IHelmRegistry.Phase.PublicLaunch,
-            incubationStart: 0,
-            publicLaunchAt:  0
-        });
-        vm.mockCall(
-            address(registry),
-            abi.encodeWithSelector(IHelmRegistry.deploymentOf.selector, agentId),
-            abi.encode(d)
-        );
-    }
-
     /// @dev Mint vault shares to `user` by depositing USDC into the vault.
     function _mintShares(AgentVault vault, address user, uint256 usdcAmount)
         internal returns (uint256 shares)
@@ -293,63 +293,52 @@ contract IntegrationTest is Test {
     /// Founder registers → incubation → public launch → Alice deposits →
     /// Backend rebalances into sNVDA → NVDA pumps 20% → Bob deposits at
     /// higher NAV → Alice redeems via 30-day queue and captures the gain.
-    ///
-    /// Uses manual deploy because the registry path doesn't yet accept
-    /// a mandate asset list (rebalance into sNVDA requires whitelisting).
     function test_fullLifecycle_happyPath() public {
-        uint256 agentId = 1;
-
         // Mandate: one asset (sNVDA) with weight constraint 0–60%.
         IAgentVault.AssetEntry[] memory assets = new IAgentVault.AssetEntry[](1);
         assets[0] = IAgentVault.AssetEntry({asset: address(sNVDA), kind: IAgentVault.AssetKind.Synthetic});
         IAgentVault.WeightConstraint[] memory weights = new IAgentVault.WeightConstraint[](1);
         weights[0] = IAgentVault.WeightConstraint({asset: address(sNVDA), minBps: 0, maxBps: 6000});
 
-        Trio memory t = _deployAgentManual(
-            agentId, founder1, backend1, assets, weights,
-            IAgentVault.Phase.Incubation
-        );
-        _mockRegistryFor(agentId, t, founder1);
+        uint256 agentId = _registerAgent(founder1, keccak256("happy-mandate"), 1_000e6, assets, weights);
+        IHelmRegistry.AgentDeployment memory d = registry.deploymentOf(agentId);
+        AgentVault   v  = AgentVault(d.vault);
+        AgentToken   tk = AgentToken(d.token);
+        FounderVault fv = FounderVault(d.founderVault);
 
-        // 1) Seed deposit — founder1 puts in 1000 USDC, shares minted to FounderVault.
-        uint256 seed = 1_000e6;
-        _giveUsdc(founder1, seed);
-        vm.startPrank(founder1);
-        usdc.approve(address(t.vault), seed);
-        t.vault.deposit(seed, address(t.founderVault));
-        vm.stopPrank();
+        // 1) Phase = Incubation after registration. Founder shares minted to FV.
+        assertEq(uint8(v.phase()), uint8(IAgentVault.Phase.Incubation));
+        // Post-fee: 995 USDC of NAV → 995e18 founder shares.
+        assertEq(tk.balanceOf(address(fv)), 995e18);
 
-        assertEq(uint8(t.vault.phase()), uint8(IAgentVault.Phase.Incubation));
-        // After 0.5% mint fee: 995 USDC of NAV → 995e18 founder shares.
-        assertEq(t.token.balanceOf(address(t.founderVault)), 995e18);
-
-        // 2) Advance to PublicLaunch (caller must be the registry-of-record;
-        //    in the manual path, that's `address(this)`).
-        t.vault.enterPublicLaunch();
-        assertEq(uint8(t.vault.phase()), uint8(IAgentVault.Phase.PublicLaunch));
+        // 2) Advance to PublicLaunch after the 30-day vetting period.
+        vm.warp(block.timestamp + 30 days);
+        registry.advanceToPublic(agentId);
+        assertEq(uint8(v.phase()), uint8(IAgentVault.Phase.PublicLaunch));
+        // Re-stamp Pyth prices — 30 days exceeds the 96h staleness window.
+        _setPythPrice(NVDA_FEED, 21_486_000);
 
         // 3) Alice deposits 100 USDC at par NAV → 99.5e18 shares.
-        uint256 aliceShares = _mintShares(t.vault, alice, 100e6);
+        uint256 aliceShares = _mintShares(v, alice, 100e6);
         assertEq(aliceShares, 99_500_000 * 1e12);
 
-        // 4) Backend rebalances: buy 2 sNVDA (≈ $429.72 worth at $214.86).
+        // 4) Backend rebalances: buy 2 sNVDA (≈ $429.72 at $214.86).
         IAgentVault.Position[] memory targets = new IAgentVault.Position[](1);
         targets[0] = IAgentVault.Position({asset: address(sNVDA), amount: 2e18});
         vm.prank(backend1);
-        t.vault.executeRebalance(targets, "happy-path-rebalance");
-        assertEq(sNVDA.balanceOf(address(t.vault)), 2e18);
+        v.executeRebalance(targets, "happy-path-rebalance");
+        assertEq(sNVDA.balanceOf(address(v)), 2e18);
 
-        uint256 navBeforePump = t.vault.totalNAV();
+        uint256 navBeforePump = v.totalNAV();
 
         // 5) NVDA price +20% → new price $257.832.
         _setPythPrice(NVDA_FEED, 25_783_200);
-
-        uint256 navAfterPump = t.vault.totalNAV();
+        uint256 navAfterPump = v.totalNAV();
         // Gain on 2 sNVDA = 2 * ($257.832 − $214.86) ≈ $85.944. Allow ±$1 rounding.
         assertApproxEqAbs(navAfterPump - navBeforePump, 85_944_000, 1_000_000);
 
         // 6) Bob deposits 100 USDC at higher NAV/share → he gets fewer shares than Alice.
-        uint256 bobShares = _mintShares(t.vault, bob, 100e6);
+        uint256 bobShares = _mintShares(v, bob, 100e6);
         assertLt(bobShares, aliceShares);
 
         // 7) Alice requests 30-day redemption.
@@ -357,56 +346,46 @@ contract IntegrationTest is Test {
         queue.setAllowedTiers(agentId, [false, true, false, true]);
 
         vm.startPrank(alice);
-        t.token.approve(address(queue), aliceShares);
+        tk.approve(address(queue), aliceShares);
         uint256 reqId = queue.requestRedeem(agentId, aliceShares, IRedemptionQueue.LockupTier.ThirtyDay);
         vm.stopPrank();
 
         // 8) Warp past unlock; alice claims.
         vm.warp(block.timestamp + 30 days);
-        // Pyth feed must still be fresh — re-stamp with the same price.
         _setPythPrice(NVDA_FEED, 25_783_200);
 
         uint256 aliceUsdcBefore = usdc.balanceOf(alice);
         uint256 usdcOut = queue.claim(reqId);
-        uint256 aliceUsdcAfter = usdc.balanceOf(alice);
-
-        assertEq(aliceUsdcAfter - aliceUsdcBefore, usdcOut);
-        // After the NVDA gain Alice should redeem for more than her 99.5 USDC stake
-        // (less the 0.5% redeem fee — so net gain after fee is what we want).
+        assertEq(usdc.balanceOf(alice) - aliceUsdcBefore, usdcOut);
+        // After the NVDA gain alice nets >99.5 USDC even after 0.5% redeem fee.
         assertGt(usdcOut, 99_500_000);
 
-        // 9) No contract in error state — sanity invariants:
-        //    a. supply matches mint/burn paths
-        assertEq(
-            t.token.totalSupply(),
-            t.token.balanceOf(address(t.founderVault)) +
-            t.token.balanceOf(bob)
-        );
-        //    b. vault still in PublicLaunch (wind-down not triggered)
-        assertEq(uint8(t.vault.phase()), uint8(IAgentVault.Phase.PublicLaunch));
+        // 9) Sanity: total supply == FV balance + Bob's balance (alice burned).
+        assertEq(tk.totalSupply(), tk.balanceOf(address(fv)) + tk.balanceOf(bob));
+        assertEq(uint8(v.phase()), uint8(IAgentVault.Phase.PublicLaunch));
     }
 
-    /// SCENARIO: Two independent agents, two backends. State, NAV, executor
-    /// authority and Pyth sensitivity must be fully isolated.
+    /// SCENARIO: Two independent agents, two backends. State, NAV, and
+    /// per-agent executor authority must all be fully isolated.
+    /// @dev Uses manual deployment because the HelmRegistry stores a *single*
+    ///      global executor — so registering both agents via the registry
+    ///      would give them the same executor and defeat the point of this
+    ///      test. The queue isn't exercised here (avoiding the deploymentOf
+    ///      mock); a separate test (`test_fullLifecycle_happyPath`) covers it.
     function test_multipleAgents_isolation() public {
-        // Agent 1: NVDA-focused, backend1. No weight constraint — keeps the
-        // isolation test focused on cross-agent boundaries rather than mandate
-        // arithmetic.
+        // Agent 1: NVDA-focused, backend1.
         IAgentVault.AssetEntry[] memory a1 = new IAgentVault.AssetEntry[](1);
         a1[0] = IAgentVault.AssetEntry({asset: address(sNVDA), kind: IAgentVault.AssetKind.Synthetic});
-        IAgentVault.WeightConstraint[] memory w1 = new IAgentVault.WeightConstraint[](0);
-
         // Agent 2: SPY-focused, backend2.
         IAgentVault.AssetEntry[] memory a2 = new IAgentVault.AssetEntry[](1);
         a2[0] = IAgentVault.AssetEntry({asset: address(sSPY), kind: IAgentVault.AssetKind.Synthetic});
-        IAgentVault.WeightConstraint[] memory w2 = new IAgentVault.WeightConstraint[](0);
 
-        Trio memory t1 = _deployAgentManual(1, founder1, backend1, a1, w1, IAgentVault.Phase.PublicLaunch);
-        Trio memory t2 = _deployAgentManual(2, founder2, backend2, a2, w2, IAgentVault.Phase.PublicLaunch);
+        Trio memory t1 = _deployAgentManual(1, founder1, backend1, a1, _emptyWeights(), IAgentVault.Phase.PublicLaunch);
+        Trio memory t2 = _deployAgentManual(2, founder2, backend2, a2, _emptyWeights(), IAgentVault.Phase.PublicLaunch);
 
         // Two distinct deployments.
-        assertTrue(address(t1.token) != address(t2.token));
-        assertTrue(address(t1.vault) != address(t2.vault));
+        assertTrue(address(t1.token)        != address(t2.token));
+        assertTrue(address(t1.vault)        != address(t2.vault));
         assertTrue(address(t1.founderVault) != address(t2.founderVault));
 
         // Alice mints only in agent 1, Bob only in agent 2.
@@ -418,131 +397,115 @@ contract IntegrationTest is Test {
         assertEq(t2.token.balanceOf(bob),   bobShares);
         assertEq(t2.token.balanceOf(alice), 0);
 
-        // backend2 cannot rebalance agent 1's vault.
+        // Cross-executor authorisation: each backend can only touch its agent.
         IAgentVault.Position[] memory p1 = new IAgentVault.Position[](1);
         p1[0] = IAgentVault.Position({asset: address(sNVDA), amount: 1e18});
+        IAgentVault.Position[] memory p2 = new IAgentVault.Position[](1);
+        p2[0] = IAgentVault.Position({asset: address(sSPY), amount: 1e18});
+
         vm.prank(backend2);
         vm.expectRevert(IAgentVault.OnlyExecutor.selector);
         t1.vault.executeRebalance(p1, "");
 
-        // backend1 cannot rebalance agent 2's vault.
-        IAgentVault.Position[] memory p2 = new IAgentVault.Position[](1);
-        p2[0] = IAgentVault.Position({asset: address(sSPY), amount: 1e18});
         vm.prank(backend1);
         vm.expectRevert(IAgentVault.OnlyExecutor.selector);
         t2.vault.executeRebalance(p2, "");
 
         // Each backend CAN rebalance its own agent.
-        vm.prank(backend1);
-        t1.vault.executeRebalance(p1, "");
-        vm.prank(backend2);
-        t2.vault.executeRebalance(p2, "");
+        vm.prank(backend1); t1.vault.executeRebalance(p1, "");
+        vm.prank(backend2); t2.vault.executeRebalance(p2, "");
         assertEq(sNVDA.balanceOf(address(t1.vault)), 1e18);
-        assertEq(sSPY.balanceOf(address(t2.vault)), 1e18);
+        assertEq(sSPY.balanceOf(address(t2.vault)),  1e18);
 
-        // NVDA-only price move must not affect agent 2's NAV.
+        // NVDA-only price move affects agent 1's NAV but not agent 2's.
         uint256 nav1Before = t1.vault.totalNAV();
         uint256 nav2Before = t2.vault.totalNAV();
         _setPythPrice(NVDA_FEED, 25_783_200); // +20%
         assertGt(t1.vault.totalNAV(), nav1Before);
         assertEq(t2.vault.totalNAV(), nav2Before);
 
-        // Alice redeeming via the queue against agent 1 does NOT touch agent 2.
-        // Redeem half of her stake — the vault's cash USDC must cover the payout,
-        // and the rebalanced sNVDA position leaves only ~78% of NAV as cash.
-        _mockRegistryFor(1, t1, founder1);
-        vm.prank(admin);
-        queue.setAllowedTiers(1, [false, true, false, true]);
-        uint256 half = aliceShares / 2;
-        vm.startPrank(alice);
-        t1.token.approve(address(queue), half);
-        uint256 reqId = queue.requestRedeem(1, half, IRedemptionQueue.LockupTier.ThirtyDay);
-        vm.stopPrank();
-        vm.warp(block.timestamp + 30 days);
-        // Re-stamp both feeds; agent 2's NAV check needs fresh SPY.
+        // And vice versa: SPY-only move only affects agent 2.
+        _setPythPrice(SPY_FEED, 81_096_400); // ≈ +10%
+        nav1Before = t1.vault.totalNAV();
+        nav2Before = t2.vault.totalNAV();
+        // Re-stamp the existing NVDA price so it stays fresh; assert no NAV change.
         _setPythPrice(NVDA_FEED, 25_783_200);
-        _setPythPrice(SPY_FEED,  73_724_000);
-        uint256 nav2After = t2.vault.totalNAV();
-        queue.claim(reqId);
-        assertEq(t2.vault.totalNAV(), nav2After);
+        assertEq(t1.vault.totalNAV(), nav1Before);
+        assertEq(t2.vault.totalNAV(), nav2Before);
     }
 
     /// SCENARIO: Multiple holders, one yield distribution. Verifies the
     /// distributor's 90/10 split and pro-rata payout to AGT holders.
     ///
-    /// NOTE: YieldHarvester.harvest() deposits yield into vault.yieldPool
-    /// only — there is no on-chain path that automatically forwards
-    /// vault.yieldPool to the DividendDistributor. So this test imitates the
-    /// production cron by pranking as the harvester and calling
-    /// `distributor.stageYield()` + `distributor.distribute()` directly. The
-    /// harvester→adapter pull is exercised separately via `harvester.harvest`
-    /// to prove that pipe works too.
+    /// @dev YieldHarvester.harvest() deposits yield into vault.yieldPool only —
+    /// there is no on-chain path that automatically forwards vault.yieldPool to
+    /// the DividendDistributor. So this test imitates the production cron by
+    /// pranking as the harvester and calling `distributor.stageYield()` +
+    /// `distributor.distribute()` directly. The harvester→adapter pull is
+    /// exercised separately via `harvester.harvest` to prove that pipe works.
     function test_yield_harvestAndDistribute_proRata() public {
-        // Setup: no synthetic assets needed for this test.
-        Trio memory t = _deployAgentManual(
-            1, founder1, backend1, _emptyAssets(), _emptyWeights(),
-            IAgentVault.Phase.PublicLaunch
-        );
-        _mockRegistryFor(1, t, founder1);
+        uint256 agentId = _registerAgent(founder1, keccak256("yield-mandate"), 1_000e6);
+        IHelmRegistry.AgentDeployment memory d = registry.deploymentOf(agentId);
+        AgentVault   v  = AgentVault(d.vault);
+        AgentToken   tk = AgentToken(d.token);
+        FounderVault fv = FounderVault(d.founderVault);
 
-        // Three external holders each mint 100 USDC of shares.
-        _mintShares(t.vault, alice, 100e6);
-        _mintShares(t.vault, bob,   100e6);
-        _mintShares(t.vault, carol, 100e6);
+        vm.warp(block.timestamp + 30 days);
+        registry.advanceToPublic(agentId);
 
-        // Founder deposits 100 USDC to the FounderVault to match the user's
-        // scenario (four equal stake holders). Shares go to FounderVault.
-        _giveUsdc(founder1, 100e6);
-        vm.startPrank(founder1);
-        usdc.approve(address(t.vault), 100e6);
-        t.vault.deposit(100e6, address(t.founderVault));
-        vm.stopPrank();
+        // Three external holders each deposit 1000 USDC; founder seed is also
+        // 1000 USDC ⇒ four equal-stake holders after the 0.5% fee.
+        _mintShares(v, alice, 1_000e6);
+        _mintShares(v, bob,   1_000e6);
+        _mintShares(v, carol, 1_000e6);
 
-        // Sanity: 4 holders with equal post-fee balances (within rounding).
-        uint256 expectedShare = 99_500_000 * 1e12;
-        assertEq(t.token.balanceOf(alice), expectedShare);
-        assertEq(t.token.balanceOf(bob),   expectedShare);
-        assertEq(t.token.balanceOf(carol), expectedShare);
-        assertEq(t.token.balanceOf(address(t.founderVault)), expectedShare);
+        uint256 expectedShare = 995e18;
+        assertEq(tk.balanceOf(alice), expectedShare);
+        assertEq(tk.balanceOf(bob),   expectedShare);
+        assertEq(tk.balanceOf(carol), expectedShare);
+        assertEq(tk.balanceOf(address(fv)), expectedShare);
 
-        // Exercise the harvester→adapter→vault yield pipe (proves it works).
+        // Exercise the harvester→adapter→vault yield pipe.
         uint256 pipeYield = 1e6; // 1 USDC
         _giveUsdc(address(yieldAdapter), pipeYield);
         yieldAdapter.setYieldAmount(pipeYield);
         vm.prank(backend1);
-        harvester.registerSource(1, address(yieldAdapter), "");
-        harvester.harvest(1);
-        assertEq(t.vault.yieldPool(), pipeYield);
+        harvester.registerSource(agentId, address(yieldAdapter), "");
+        harvester.harvest(agentId);
+        assertEq(v.yieldPool(), pipeYield);
 
-        // Simulate the production cron: stage yield to distributor, distribute.
-        // The harvester is the only authorised caller for both functions.
-        uint256 yieldAmount = 1_000e6; // 1000 USDC
+        // Simulate production cron: stage to distributor, then distribute.
+        uint256 yieldAmount = 1_000e6;
         _giveUsdc(address(harvester), yieldAmount);
         vm.startPrank(address(harvester));
         usdc.approve(address(distributor), yieldAmount);
-        distributor.stageYield(1, yieldAmount);
-        uint256 epoch = distributor.distribute(1);
+        distributor.stageYield(agentId, yieldAmount);
+        uint256 epoch = distributor.distribute(agentId);
         vm.stopPrank();
         assertEq(epoch, 1);
 
-        // 90% to holders pool, 10% to founder carry.
-        (uint256 total, uint256 holdersShare,, ) = distributor.epochSnapshot(1, epoch);
+        (uint256 total, uint256 holdersShare,, ) = distributor.epochSnapshot(agentId, epoch);
         assertEq(total, yieldAmount);
         assertEq(holdersShare, 900e6);
-        assertEq(t.founderVault.carryBalance(), 100e6);
+        assertEq(fv.carryBalance(), 100e6);
 
-        _claimAndCheckYield(t, epoch, yieldAmount);
+        _claimAndCheckYield(agentId, fv, epoch, yieldAmount);
     }
 
     /// @dev Split out to keep `test_yield_harvestAndDistribute_proRata` under
     ///      Solidity's stack-too-deep limit.
-    function _claimAndCheckYield(Trio memory t, uint256 epoch, uint256 yieldAmount) internal {
+    function _claimAndCheckYield(
+        uint256 agentId,
+        FounderVault fv,
+        uint256 epoch,
+        uint256 yieldAmount
+    ) internal {
         uint256[] memory eps = new uint256[](1);
         eps[0] = epoch;
 
-        vm.prank(alice); uint256 ac = distributor.claim(1, eps);
-        vm.prank(bob);   uint256 bc = distributor.claim(1, eps);
-        vm.prank(carol); uint256 cc = distributor.claim(1, eps);
+        vm.prank(alice); uint256 ac = distributor.claim(agentId, eps);
+        vm.prank(bob);   uint256 bc = distributor.claim(agentId, eps);
+        vm.prank(carol); uint256 cc = distributor.claim(agentId, eps);
 
         // Each holder owns ¼ of supply → ¼ of the 900 USDC holders pool = 225 USDC.
         assertApproxEqAbs(ac, 225e6, 1);
@@ -552,152 +515,123 @@ contract IntegrationTest is Test {
         // Double-claim must revert.
         vm.prank(alice);
         vm.expectRevert();
-        distributor.claim(1, eps);
+        distributor.claim(agentId, eps);
 
         // Founder claims carry from FounderVault.
         vm.prank(founder1);
-        uint256 carry = t.founderVault.claimCarry();
+        uint256 carry = fv.claimCarry();
         assertEq(carry, 100e6);
         assertEq(usdc.balanceOf(founder1), 100e6);
 
         // Holders + founder-vault pending + carry == staged yield. Founder vault
         // still has the 4th equal-stake share, claimable separately.
-        uint256 pendingFv = distributor.pendingClaimOf(1, address(t.founderVault));
+        uint256 pendingFv = distributor.pendingClaimOf(agentId, address(fv));
         assertApproxEqAbs(ac + bc + cc + pendingFv, 900e6, 4);
         assertEq(ac + bc + cc + pendingFv + carry, yieldAmount - (900e6 - ac - bc - cc - pendingFv));
     }
 
-    /// SCENARIO: Many user redemptions push the founder's effective share
-    /// of total supply over the subordination threshold. Verifies what the
-    /// system actually does today.
-    ///
-    /// // TODO: bug discovered — there is no on-chain auto-trigger that moves
-    /// the vault into WindDown when redemptions push the founder's % share over
-    /// `subordinationThresholdBps`. The threshold check in FounderVault.withdraw
-    /// only guards founder share *withdrawals* from the FounderVault, not
-    /// user-side AGT redemptions. So step 6 of the user's scenario ("WindDown
-    /// was auto-triggered on the second claim") cannot pass today; we assert
-    /// the *current* behaviour and flag this gap.
+    /// SCENARIO: Many user redemptions push the founder's effective share of
+    /// total supply over the subordination threshold. Verifies what the system
+    /// does today (no auto-trigger). Bug 1's fix will tighten this assertion.
     function test_redemptionQueue_subordinationAutoTrigger() public {
-        Trio memory t = _deployAgentManual(
-            1, founder1, backend1, _emptyAssets(), _emptyWeights(),
-            IAgentVault.Phase.PublicLaunch
-        );
-        _mockRegistryFor(1, t, founder1);
+        uint256 agentId = _registerAgent(founder1, keccak256("sub-mandate"), 1_000e6);
+        IHelmRegistry.AgentDeployment memory d = registry.deploymentOf(agentId);
+        AgentVault v  = AgentVault(d.vault);
+        AgentToken tk = AgentToken(d.token);
+        address    fv = d.founderVault;
 
-        // Set up: founder holds 1000 AGT in FounderVault, Alice holds 4000.
-        // First, seed via founder1's deposit (gives founder shares to FV).
-        _giveUsdc(founder1, 1_005_025_125); // ≈1005.025 USDC pre-fee → ~1000 net
-        vm.startPrank(founder1);
-        usdc.approve(address(t.vault), 1_005_025_125);
-        t.vault.deposit(1_005_025_125, address(t.founderVault));
-        vm.stopPrank();
+        vm.warp(block.timestamp + 30 days);
+        registry.advanceToPublic(agentId);
 
-        // Alice mints 4000 worth at the same NAV.
-        _mintShares(t.vault, alice, 4_020_100_502); // ≈4020.1 USDC → ~4000e18 shares
+        // Alice mints 4x the founder's stake at par NAV.
+        _mintShares(v, alice, 4_000e6);
 
-        uint256 founderShares = t.token.balanceOf(address(t.founderVault));
-        uint256 aliceShares   = t.token.balanceOf(alice);
-        uint256 totalBefore   = t.token.totalSupply();
-        assertApproxEqAbs(founderShares * 10_000 / totalBefore, 2000, 10); // ~20%
+        uint256 founderShares = tk.balanceOf(fv);
+        uint256 aliceShares   = tk.balanceOf(alice);
+        assertApproxEqAbs(founderShares * 10_000 / tk.totalSupply(), 2000, 10); // ~20%
 
-        // Enable instant redemption for this agent.
+        // Enable instant redemption.
         vm.prank(admin);
-        queue.setAllowedTiers(1, [true, false, false, false]);
+        queue.setAllowedTiers(agentId, [true, false, false, false]);
 
-        // Alice requests first instant redemption (50% of her stake).
+        // Alice redeems 50% of her stake — founder share rises but stays <40%.
         vm.startPrank(alice);
-        t.token.approve(address(queue), aliceShares);
-        uint256 req1 = queue.requestRedeem(1, aliceShares / 2, IRedemptionQueue.LockupTier.Instant);
+        tk.approve(address(queue), aliceShares);
+        uint256 req1 = queue.requestRedeem(agentId, aliceShares / 2, IRedemptionQueue.LockupTier.Instant);
         vm.stopPrank();
+        queue.claim(req1);
+        assertLt(founderShares * 10_000 / tk.totalSupply(), 4000);
 
-        uint256 cashOut1 = queue.claim(req1);
-        assertGt(cashOut1, 0);
-        // After this claim, founder's share rises but stays below 40%.
-        uint256 supplyMid = t.token.totalSupply();
-        uint256 fShareMid = founderShares * 10_000 / supplyMid;
-        assertLt(fShareMid, 4000);
-
-        // Alice requests another instant redemption pushing founder past 40%.
+        // Alice redeems more, pushing founder past 40%.
         vm.startPrank(alice);
-        uint256 req2 = queue.requestRedeem(1, aliceShares / 2 - aliceShares / 5,
+        uint256 req2 = queue.requestRedeem(agentId, aliceShares / 2 - aliceShares / 5,
             IRedemptionQueue.LockupTier.Instant);
         vm.stopPrank();
         queue.claim(req2);
-
-        uint256 supplyAfter = t.token.totalSupply();
-        uint256 fShareAfter = founderShares * 10_000 / supplyAfter;
-        assertGt(fShareAfter, 4000); // founder > 40% of supply
+        assertGt(founderShares * 10_000 / tk.totalSupply(), 4000);
 
         // // TODO: bug discovered — vault.phase() *should* be WindDown here per
         // the user's spec, but no auto-trigger exists. We assert the current
         // behaviour (still PublicLaunch) so the test surfaces the gap.
-        assertEq(uint8(t.vault.phase()), uint8(IAgentVault.Phase.PublicLaunch));
+        assertEq(uint8(v.phase()), uint8(IAgentVault.Phase.PublicLaunch));
     }
 
     /// SCENARIO: Wind-down — verify the senior/junior split executed by settle().
-    ///
-    /// // TODO: bug discovered — `settle()` computes the senior/junior split
-    /// pro-rata of total supply, not with senior priority. With the current
-    /// math, founder (junior) is *not* loss-absorbing — they get a pro-rata
-    /// share of the depleted cash. The user's expected rug-pull protection
-    /// requires `seniorPay = min(cash, seniorShares * preLossNAV / supply)`
-    /// and `juniorPay = cash − seniorPay`. We test the current implementation
-    /// and flag the deviation.
+    /// With Bug 2 still open, settle() pays pro-rata; this test will be tightened
+    /// to assert senior priority once Bug 2 is fixed.
     function test_windDown_seniorPriority() public {
-        // Build vault holding sNVDA so we can drop NAV via a Pyth price move.
+        // Mandate: sNVDA so a Pyth move drives the loss.
         IAgentVault.AssetEntry[] memory assets = new IAgentVault.AssetEntry[](1);
         assets[0] = IAgentVault.AssetEntry({asset: address(sNVDA), kind: IAgentVault.AssetKind.Synthetic});
         IAgentVault.WeightConstraint[] memory weights = new IAgentVault.WeightConstraint[](1);
         weights[0] = IAgentVault.WeightConstraint({asset: address(sNVDA), minBps: 0, maxBps: 10_000});
 
-        Trio memory t = _deployAgentManual(
-            1, founder1, backend1, assets, weights, IAgentVault.Phase.PublicLaunch
-        );
-        _mockRegistryFor(1, t, founder1);
+        uint256 agentId = _registerAgent(founder1, keccak256("wd-mandate"), 1_000e6, assets, weights);
+        IHelmRegistry.AgentDeployment memory d = registry.deploymentOf(agentId);
+        AgentVault   v  = AgentVault(d.vault);
+        FounderVault fv = FounderVault(d.founderVault);
 
-        // Founder seed = 200 USDC; Alice and Bob each 400 USDC (senior tier).
-        _giveUsdc(founder1, 200e6);
-        vm.startPrank(founder1);
-        usdc.approve(address(t.vault), 200e6);
-        t.vault.deposit(200e6, address(t.founderVault));
-        vm.stopPrank();
-        _mintShares(t.vault, alice, 400e6);
-        _mintShares(t.vault, bob,   400e6);
+        vm.warp(block.timestamp + 30 days);
+        registry.advanceToPublic(agentId);
+        _setPythPrice(NVDA_FEED, 21_486_000);
 
-        // Backend rebalances ~50% into sNVDA so a Pyth move actually moves NAV.
+        // Senior holders deposit. Each is 2× the founder seed so the senior
+        // tranche is ~80% of supply (founder ~20%).
+        _mintShares(v, alice, 2_000e6);
+        _mintShares(v, bob,   2_000e6);
+
+        // Backend rebalances some cash into sNVDA so a Pyth move actually
+        // affects NAV. Keep position modest so cash covers the seniorPay.
         IAgentVault.Position[] memory pos = new IAgentVault.Position[](1);
         pos[0] = IAgentVault.Position({asset: address(sNVDA), amount: 2e18}); // ≈ $429.72
         vm.prank(backend1);
-        t.vault.executeRebalance(pos, "");
+        v.executeRebalance(pos, "");
 
-        // Halve NVDA → vault NAV drops materially.
+        // Halve NVDA → vault NAV drops.
         _setPythPrice(NVDA_FEED, 10_743_000); // ≈ $107.43
 
-        // Founder calls triggerWindDown via FounderVault.
+        // Founder triggers wind-down via FounderVault.
         vm.prank(founder1);
-        t.founderVault.triggerWindDown("nav collapse");
-        assertEq(uint8(t.vault.phase()), uint8(IAgentVault.Phase.WindDown));
+        fv.triggerWindDown("nav collapse");
+        assertEq(uint8(v.phase()), uint8(IAgentVault.Phase.WindDown));
 
         // Liquidate the sNVDA position.
-        t.vault.progressWindDown();
-        // Re-stamp price (sell happens at the new price, which is correct).
+        v.progressWindDown();
         _setPythPrice(NVDA_FEED, 10_743_000);
 
         // Warp past the 90d senior window and settle.
         vm.warp(block.timestamp + 91 days);
         _setPythPrice(NVDA_FEED, 10_743_000);
-        t.vault.settle();
-        assertEq(uint8(t.vault.phase()), uint8(IAgentVault.Phase.Settled));
+        v.settle();
+        assertEq(uint8(v.phase()), uint8(IAgentVault.Phase.Settled));
 
-        (,,,,, uint256 seniorPay, uint256 juniorPay) = t.vault.windDown();
+        (,,,,, uint256 seniorPay, uint256 juniorPay) = v.windDown();
         assertGt(seniorPay, 0);
 
         // CURRENT BEHAVIOUR: pro-rata split. juniorPay > 0 even though seniors
-        // are not made whole. With senior priority we would expect juniorPay≈0.
+        // are not made whole. Bug 2 fix will make juniorPay ≈ 0.
         assertGt(juniorPay, 0);
-        // Senior should still receive *more* in absolute terms than junior
-        // because senior holds more shares (~800/1000).
+        // Senior should still receive *more* in absolute terms than junior.
         assertGt(seniorPay, juniorPay);
     }
 

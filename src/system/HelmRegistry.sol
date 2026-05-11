@@ -122,7 +122,9 @@ contract HelmRegistry is IHelmRegistry {
     function registerAgent(
         bytes32 mandateHash,
         string calldata mandateURI,
-        uint256 seedUSDC
+        uint256 seedUSDC,
+        IAgentVault.AssetEntry[] calldata assets,
+        IAgentVault.WeightConstraint[] calldata weightConstraints
     ) external override returns (uint256 agentId) {
         if (mandateHash == bytes32(0)) revert MandateInvalid();
         if (bytes(mandateURI).length == 0) revert MandateInvalid();
@@ -132,7 +134,9 @@ contract HelmRegistry is IHelmRegistry {
         _usedMandates[mandateHash] = true;
         agentId = _nextAgentId++;
 
-        DeployResult memory dr = _deployTrio(agentId, msg.sender, mandateHash, mandateURI);
+        DeployResult memory dr = _deployTrio(
+            agentId, msg.sender, mandateHash, mandateURI, assets, weightConstraints
+        );
 
         // Pull seed USDC from founder → deposit into vault
         IERC20(usdc).safeTransferFrom(msg.sender, address(this), seedUSDC);
@@ -240,7 +244,9 @@ contract HelmRegistry is IHelmRegistry {
         uint256 agentId,
         address founderAddr,
         bytes32 mandateHash,
-        string calldata mandateURI
+        string calldata mandateURI,
+        IAgentVault.AssetEntry[] calldata assets,
+        IAgentVault.WeightConstraint[] calldata weightConstraints
     ) internal returns (DeployResult memory dr) {
         dr.token = Clones.clone(agentTokenImpl);
         dr.vault = Clones.clone(agentVaultImpl);
@@ -254,8 +260,12 @@ contract HelmRegistry is IHelmRegistry {
             agentId
         );
 
-        // 2. AgentVault — references token and founder vault by address.
-        _initVault(dr.vault, agentId, mandateHash, mandateURI, dr.token, dr.founderVault);
+        // 2. AgentVault — references token and founder vault by address;
+        //    receives the mandate's tradeable assets and weight bounds.
+        _initVault(
+            dr.vault, agentId, mandateHash, mandateURI,
+            dr.token, dr.founderVault, assets, weightConstraints
+        );
 
         // 3. FounderVault — references token and vault by address.
         IFounderVault(dr.founderVault).initialize(
@@ -270,11 +280,10 @@ contract HelmRegistry is IHelmRegistry {
         bytes32 mandateHash_,
         string calldata mandateURI_,
         address token_,
-        address founderVault_
+        address founderVault_,
+        IAgentVault.AssetEntry[] calldata assets,
+        IAgentVault.WeightConstraint[] calldata weightConstraints
     ) internal {
-        IAgentVault.AssetEntry[] memory emptyAssets = new IAgentVault.AssetEntry[](0);
-        IAgentVault.WeightConstraint[] memory emptyWc = new IAgentVault.WeightConstraint[](0);
-
         IAgentVault(vault_).initialize(
             IAgentVault.InitParams({
                 agentId: agentId_,
@@ -290,8 +299,8 @@ contract HelmRegistry is IHelmRegistry {
                 usdc: usdc,
                 executor: executor,
                 initialPhase: IAgentVault.Phase.Incubation,
-                assets: emptyAssets,
-                weightConstraints: emptyWc,
+                assets: assets,
+                weightConstraints: weightConstraints,
                 seniorWindowDuration: 0
             })
         );
