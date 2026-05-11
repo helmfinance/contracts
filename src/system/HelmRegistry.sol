@@ -9,6 +9,7 @@ import {IHelmRegistry} from "../interfaces/IHelmRegistry.sol";
 import {IAgentVault} from "../interfaces/IAgentVault.sol";
 import {IAgentToken} from "../interfaces/IAgentToken.sol";
 import {IFounderVault} from "../interfaces/IFounderVault.sol";
+import {AgentNFT} from "./AgentNFT.sol";
 
 /// @title HelmRegistry
 /// @notice Singleton factory that deploys agent trios (AgentToken, AgentVault,
@@ -43,6 +44,9 @@ contract HelmRegistry is IHelmRegistry {
     address public immutable agentTokenImpl;
     address public immutable agentVaultImpl;
     address public immutable founderVaultImpl;
+
+    /// @notice Singleton AgentNFT (ERC-8004 identity + reputation).
+    AgentNFT public immutable agentNFT;
 
     // ─── default mandate params ────────────────────────────────────
 
@@ -90,6 +94,7 @@ contract HelmRegistry is IHelmRegistry {
         address pythAdapter;
         address executor;
         address distributor;
+        address agentNFT;
         address agentTokenImpl;
         address agentVaultImpl;
         address founderVaultImpl;
@@ -107,6 +112,7 @@ contract HelmRegistry is IHelmRegistry {
         pythAdapter = p.pythAdapter;
         executor = p.executor;
         distributor = p.distributor;
+        agentNFT = AgentNFT(p.agentNFT);
         agentTokenImpl = p.agentTokenImpl;
         agentVaultImpl = p.agentVaultImpl;
         founderVaultImpl = p.founderVaultImpl;
@@ -148,6 +154,10 @@ contract HelmRegistry is IHelmRegistry {
         IERC20(dr.token).forceApprove(dr.founderVault, founderShares);
         IFounderVault(dr.founderVault).depositFounderShares(founderShares);
 
+        // Mint the agent's identity NFT to the founder (singleton AgentNFT,
+        // tokenId == agentId). Reputation starts at MAX_BPS.
+        agentNFT.mint(agentId, msg.sender);
+
         // Record
         _agents[agentId] = AgentRecord({
             founder: msg.sender,
@@ -162,7 +172,7 @@ contract HelmRegistry is IHelmRegistry {
 
         emit AgentRegistered(agentId, msg.sender, AgentDeployment({
             agentId: agentId,
-            nft: address(0),
+            nft: address(agentNFT),
             token: dr.token,
             vault: dr.vault,
             founderVault: dr.founderVault,
@@ -194,13 +204,30 @@ contract HelmRegistry is IHelmRegistry {
         emit AgentSlashed(agentId, reason);
     }
 
-    /// @notice Called by AgentVault when it enters WindDown.
+    /// @notice Called by AgentVault when it enters WindDown. Also slashes the
+    ///         agent's reputation NFT by 20% (`2000` bps) — wind-down is a
+    ///         strong negative signal, even when triggered by a market-loss
+    ///         path rather than a mandate breach.
     /// @param agentId The agent being wound down.
     function markWindDown(uint256 agentId) external {
         AgentRecord storage a = _agent(agentId);
         if (msg.sender != a.vault) revert NotVault(agentId);
         a.phase = Phase.WindDown;
+        agentNFT.slash(agentId, 2_000, "wind_down");
         emit AgentWindDown(agentId);
+    }
+
+    /// @notice Called by an agent's AgentVault when a mandate breach is
+    ///         observed (e.g. a weight-constraint violation that reverted a
+    ///         rebalance and was reported by the off-chain indexer). Slashes
+    ///         reputation by 10% (`1000` bps) per breach.
+    /// @dev Currently invoked manually by the back-end indexer relaying the
+    ///      failed-tx signal back through the vault; see AgentVault's
+    ///      executeRebalance NatSpec for the design rationale.
+    function notifyMandateBreach(uint256 agentId, string calldata reason) external {
+        AgentRecord storage a = _agent(agentId);
+        if (msg.sender != a.vault) revert NotVault(agentId);
+        agentNFT.slash(agentId, 1_000, reason);
     }
 
     /// @notice Called by AgentVault when settlement completes.
@@ -218,7 +245,7 @@ contract HelmRegistry is IHelmRegistry {
         AgentRecord storage a = _agent(agentId);
         return AgentDeployment({
             agentId: agentId,
-            nft: address(0),
+            nft: address(agentNFT),
             token: a.token,
             vault: a.vault,
             founderVault: a.founderVault,

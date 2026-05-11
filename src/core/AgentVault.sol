@@ -388,6 +388,14 @@ contract AgentVault is IAgentVault, Initializable, ReentrancyGuard {
     ///         under-target positions from cash. After the rebalance, every
     ///         constrained asset's USDC weight must satisfy the mandate or the
     ///         whole call reverts.
+    /// @dev Design note: a mandate-weight breach reverts the entire call —
+    ///      the vault cannot atomically *both* revert the rebalance *and*
+    ///      call back into the registry to slash reputation. The off-chain
+    ///      indexer watches for reverted rebalance txs and relays the breach
+    ///      via {HelmRegistry.notifyMandateBreach}, which slashes the agent's
+    ///      AgentNFT. Auto-relayed slashing inside this function would
+    ///      require splitting weight enforcement from the atomic-revert path,
+    ///      which we defer to a future iteration.
     function executeRebalance(Position[] calldata targets, bytes calldata strategyProof)
         external
         override

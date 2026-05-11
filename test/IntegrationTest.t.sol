@@ -10,6 +10,7 @@ import {AgentVault} from "../src/core/AgentVault.sol";
 import {FounderVault} from "../src/core/FounderVault.sol";
 import {HelmRegistry} from "../src/system/HelmRegistry.sol";
 import {RedemptionQueue} from "../src/system/RedemptionQueue.sol";
+import {AgentNFT} from "../src/system/AgentNFT.sol";
 import {YieldHarvester} from "../src/yield/YieldHarvester.sol";
 import {DividendDistributor} from "../src/yield/DividendDistributor.sol";
 import {PythPriceAdapter} from "../src/adapters/PythPriceAdapter.sol";
@@ -45,6 +46,7 @@ contract IntegrationTest is Test {
     MockYieldAdapter yieldAdapter;
     MockPlatformTreasury treasury;
     HelmRegistry registry;
+    AgentNFT agentNFT;
     YieldHarvester harvester;
     DividendDistributor distributor;
     RedemptionQueue queue;
@@ -131,14 +133,14 @@ contract IntegrationTest is Test {
         treasury.setFeeRate(IPlatformTreasury.FeeKind.Rebalance,  5);  // 0.05%
         vm.label(address(treasury), "PlatformTreasury(mock)");
 
-        // 8/9. The registry, queue, harvester and distributor are mutually
-        // dependent (each takes the others' addresses in its constructor).
-        // We resolve the cycle by predicting the registry's create-address,
-        // deploying the three dependents with that prediction, then deploying
-        // the registry. Each `new` increments this contract's nonce by one.
+        // 8/9. AgentNFT + queue + harvester + distributor + registry form a
+        // mutual-dependency cycle (each takes the registry, and the registry
+        // takes each of them). Predict the registry's CREATE address, deploy
+        // the four dependents with that prediction, then deploy the registry.
         uint64 nonce = vm.getNonce(address(this));
-        address predictedRegistry = vm.computeCreateAddress(address(this), nonce + 3);
+        address predictedRegistry = vm.computeCreateAddress(address(this), nonce + 4);
 
+        agentNFT    = new AgentNFT(predictedRegistry, admin);
         harvester   = new YieldHarvester(backend1, predictedRegistry, address(usdc));
         distributor = new DividendDistributor(address(harvester), predictedRegistry, address(usdc));
         queue       = new RedemptionQueue(admin, predictedRegistry);
@@ -152,6 +154,7 @@ contract IntegrationTest is Test {
             pythAdapter:             address(priceAdapter),
             executor:                backend1,
             distributor:             address(distributor),
+            agentNFT:                address(agentNFT),
             agentTokenImpl:          tokenImpl,
             agentVaultImpl:          vaultImpl,
             founderVaultImpl:        fvImpl,
@@ -161,6 +164,7 @@ contract IntegrationTest is Test {
         }));
         require(address(registry) == predictedRegistry, "registry addr mismatch");
         vm.label(address(registry),    "HelmRegistry");
+        vm.label(address(agentNFT),    "AgentNFT");
         vm.label(address(queue),       "RedemptionQueue");
         vm.label(address(harvester),   "YieldHarvester");
         vm.label(address(distributor), "DividendDistributor");
@@ -310,6 +314,9 @@ contract IntegrationTest is Test {
         assertEq(uint8(v.phase()), uint8(IAgentVault.Phase.Incubation));
         // Post-fee: 995 USDC of NAV → 995e18 founder shares.
         assertEq(tk.balanceOf(address(fv)), 995e18);
+        // AgentNFT minted to founder at full reputation.
+        assertEq(agentNFT.ownerOf(agentId), founder1);
+        assertEq(agentNFT.reputationOf(agentId), 10_000);
 
         // 2) Advance to PublicLaunch after the 30-day vetting period.
         vm.warp(block.timestamp + 30 days);

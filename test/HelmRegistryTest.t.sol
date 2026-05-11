@@ -3,6 +3,7 @@ pragma solidity ^0.8.24;
 
 import "forge-std/Test.sol";
 import "../src/system/HelmRegistry.sol";
+import {AgentNFT} from "../src/system/AgentNFT.sol";
 import "../src/core/AgentVault.sol";
 import "../src/core/AgentToken.sol";
 import "../src/core/FounderVault.sol";
@@ -11,6 +12,7 @@ import "./mocks/MockPlatformTreasury.sol";
 
 contract HelmRegistryTest is Test {
     HelmRegistry registry;
+    AgentNFT agentNFT;
     MockERC20 usdc;
     MockPlatformTreasury treasury;
 
@@ -39,6 +41,12 @@ contract HelmRegistryTest is Test {
         address vaultImpl = address(new AgentVault());
         address fvImpl    = address(new FounderVault());
 
+        // Pre-deploy AgentNFT with the predicted registry address so its
+        // onlyRegistry modifier sees the right caller.
+        uint64 nonce = vm.getNonce(address(this));
+        address predictedRegistry = vm.computeCreateAddress(address(this), nonce + 1);
+        agentNFT = new AgentNFT(predictedRegistry, admin);
+
         registry = new HelmRegistry(HelmRegistry.RegistryParams({
             admin: admin,
             usdc: address(usdc),
@@ -48,6 +56,7 @@ contract HelmRegistryTest is Test {
             pythAdapter: pythAdapter,
             executor: executor,
             distributor: distributor,
+            agentNFT: address(agentNFT),
             agentTokenImpl: tokenImpl,
             agentVaultImpl: vaultImpl,
             founderVaultImpl: fvImpl,
@@ -55,6 +64,7 @@ contract HelmRegistryTest is Test {
             defaultSubordinationBps: 5000,
             defaultFounderShareBps: 2000
         }));
+        require(address(registry) == predictedRegistry, "registry addr mismatch");
     }
 
     // ---------------------------------------------------------------
@@ -103,6 +113,11 @@ contract HelmRegistryTest is Test {
         FounderVault fv = FounderVault(d.founderVault);
         assertGt(AgentToken(d.token).balanceOf(d.founderVault), 0);
         assertEq(fv.founder(), founder);
+
+        // AgentNFT minted to the founder at full reputation.
+        assertEq(d.nft, address(agentNFT));
+        assertEq(agentNFT.ownerOf(agentId), founder);
+        assertEq(agentNFT.reputationOf(agentId), 10_000);
     }
 
     // ---------------------------------------------------------------
@@ -166,6 +181,10 @@ contract HelmRegistryTest is Test {
         registry.markWindDown(agentId);
 
         assertEq(uint8(registry.phaseOf(agentId)), uint8(IHelmRegistry.Phase.WindDown));
+        // 20% slash applied via AgentNFT (10000 → 8000 bps).
+        assertEq(agentNFT.reputationOf(agentId), 8_000);
+        (uint256 slashCount, ) = agentNFT.slashInfoOf(agentId);
+        assertEq(slashCount, 1);
     }
 
     // ---------------------------------------------------------------
