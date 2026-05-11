@@ -754,41 +754,20 @@ contract IntegrationTest is Test {
     }
 
     /// SCENARIO: Founder must respect lockup + subordination on FounderVault.
-    ///
-    /// // TODO: bug discovered — HelmRegistry.registerAgent mints founder
-    /// shares *directly* to the FounderVault contract via `vault.deposit`,
-    /// without calling `founderVault.depositFounderShares`. So the
-    /// FounderVault's `lockupEndsAt` is never set (stays 0), `totalDeposited`
-    /// stays 0, and `totalSharesHeld` stays 0. As a result the lockup is
-    /// trivially bypassed — but founder still can't withdraw because the
-    /// `amount > totalSharesHeld` check (which also gates on the same
-    /// counter) reverts. We exercise the path explicitly through
-    /// `depositFounderShares` to test the intended lockup semantics.
+    /// The 180-day lockup is set during registerAgent (the seed shares are
+    /// routed through depositFounderShares so the lockup clock starts).
     function test_founderLockup_enforced() public {
         uint256 agentId = _registerAgent(founder1, keccak256("lockup-mandate"), 1_000e6);
         IHelmRegistry.AgentDeployment memory d = registry.deploymentOf(agentId);
         FounderVault fv = FounderVault(d.founderVault);
-        AgentToken  tk = AgentToken(d.token);
+        AgentToken   tk = AgentToken(d.token);
 
-        // Documenting the gap: the FV currently has shares but lockupEndsAt = 0.
-        assertGt(tk.balanceOf(address(fv)), 0);
-        assertEq(fv.lockupEndsAt(), 0);
-        assertEq(fv.totalDeposited(), 0);
-
-        // Bootstrap the intended state by *re-pushing* shares through
-        // depositFounderShares. We use vm.prank as the founder vault to
-        // approve itself; the founder vault holds the AGT, so it sends them
-        // back into itself via depositFounderShares.
+        // Lockup clock started, totals tracked, all shares custodied in FV.
         uint256 shares = tk.balanceOf(address(fv));
-        vm.startPrank(address(fv));
-        tk.transfer(founder1, shares);
-        vm.stopPrank();
-        vm.startPrank(founder1);
-        tk.approve(address(fv), shares);
-        fv.depositFounderShares(shares);
-        vm.stopPrank();
-
-        assertGt(fv.lockupEndsAt(), uint64(block.timestamp));
+        assertGt(shares, 0);
+        assertEq(fv.lockupEndsAt(), uint64(block.timestamp + 180 days));
+        assertEq(fv.totalDeposited(), shares);
+        assertEq(fv.totalSharesHeld(), shares);
 
         // Immediate withdraw — locked.
         vm.prank(founder1);

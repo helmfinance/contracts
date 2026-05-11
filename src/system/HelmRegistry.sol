@@ -138,10 +138,15 @@ contract HelmRegistry is IHelmRegistry {
             agentId, msg.sender, mandateHash, mandateURI, assets, weightConstraints
         );
 
-        // Pull seed USDC from founder → deposit into vault
+        // Pull seed USDC from founder → deposit into vault. Shares are minted
+        // to *this contract* first, then re-deposited into FounderVault via
+        // depositFounderShares so the lockup clock starts and totalDeposited
+        // is tracked properly.
         IERC20(usdc).safeTransferFrom(msg.sender, address(this), seedUSDC);
         IERC20(usdc).forceApprove(dr.vault, seedUSDC);
-        IAgentVault(dr.vault).deposit(seedUSDC, dr.founderVault);
+        uint256 founderShares = IAgentVault(dr.vault).deposit(seedUSDC, address(this));
+        IERC20(dr.token).forceApprove(dr.founderVault, founderShares);
+        IFounderVault(dr.founderVault).depositFounderShares(founderShares);
 
         // Record
         _agents[agentId] = AgentRecord({
