@@ -8,7 +8,11 @@ solc_version = "0.8.24"
 optimizer = true
 optimizer_runs = 200
 via_ir = false
-fs_permissions = [{ access = "read", path = "./out" }, { access = "read", path = "./pyth_update.json" }]
+fs_permissions = [
+    { access = "read",       path = "./out" },
+    { access = "read",       path = "./pyth_update.json" },
+    { access = "read-write", path = "./deployments" },
+]
 
 [profile.default.fuzz]
 runs = 256
