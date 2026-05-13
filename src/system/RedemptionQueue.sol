@@ -10,6 +10,7 @@ import {IAgentVault} from "../interfaces/IAgentVault.sol";
 import {IAgentToken} from "../interfaces/IAgentToken.sol";
 import {IFounderVault} from "../interfaces/IFounderVault.sol";
 import {IHelmRegistry} from "../interfaces/IHelmRegistry.sol";
+import {ITimeProvider} from "../interfaces/ITimeProvider.sol";
 
 /// @title RedemptionQueue
 /// @notice Singleton redemption queue with lockup tiers (0/30/60/90 days).
@@ -27,6 +28,7 @@ contract RedemptionQueue is IRedemptionQueue, ReentrancyGuard {
 
     address public immutable admin;
     IHelmRegistry public immutable registry;
+    ITimeProvider public immutable timeProvider;
 
     /// @dev agentId → tier → allowed
     mapping(uint256 => mapping(LockupTier => bool)) public tierAllowed;
@@ -54,10 +56,16 @@ contract RedemptionQueue is IRedemptionQueue, ReentrancyGuard {
 
     /// @param admin_ Address that can configure allowed tiers.
     /// @param registry_ HelmRegistry address for agent lookups.
-    constructor(address admin_, address registry_) {
+    /// @param timeProvider_ Singleton TimeProvider for demo fast-forward.
+    constructor(address admin_, address registry_, address timeProvider_) {
         admin = admin_;
         registry = IHelmRegistry(registry_);
+        timeProvider = ITimeProvider(timeProvider_);
         _nextRequestId = 1;
+    }
+
+    function _now() internal view returns (uint256) {
+        return timeProvider.currentTime();
     }
 
     // ─── admin: tier configuration ──────────────────────────────────
@@ -91,7 +99,7 @@ contract RedemptionQueue is IRedemptionQueue, ReentrancyGuard {
         IERC20(tokenOf[agentId]).safeTransferFrom(msg.sender, address(this), shares);
 
         requestId = _nextRequestId++;
-        uint64 unlockAt = uint64(block.timestamp) + TIER_DAYS[uint8(tier)] * 1 days;
+        uint64 unlockAt = uint64(_now()) + TIER_DAYS[uint8(tier)] * 1 days;
 
         _requests[requestId] = Request({
             agentId: agentId,
@@ -120,7 +128,7 @@ contract RedemptionQueue is IRedemptionQueue, ReentrancyGuard {
         if (r.holder == address(0)) revert NotRequestOwner();
         if (r.claimed) revert AlreadyClaimed();
         if (r.cancelled) revert AlreadyCancelled();
-        if (block.timestamp < r.unlockAt) revert StillLocked(r.unlockAt);
+        if (_now() < r.unlockAt) revert StillLocked(r.unlockAt);
 
         r.claimed = true;
         _pendingSharesFor[r.agentId] -= r.shares;
@@ -152,7 +160,7 @@ contract RedemptionQueue is IRedemptionQueue, ReentrancyGuard {
         if (r.cancelled) revert AlreadyCancelled();
 
         // Must cancel at least 1 day before unlock
-        if (r.unlockAt > 0 && block.timestamp >= r.unlockAt - 1 days) {
+        if (r.unlockAt > 0 && _now() >= r.unlockAt - 1 days) {
             revert CancelWindowClosed();
         }
 

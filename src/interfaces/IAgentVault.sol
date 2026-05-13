@@ -53,6 +53,7 @@ interface IAgentVault is IERC4626 {
         AssetEntry[] assets;
         WeightConstraint[] weightConstraints;
         uint64  seniorWindowDuration; // 0 → default
+        address timeProvider;          // singleton TimeProvider
     }
 
     event Rebalanced(bytes32 indexed strategyHash, uint256 navAfter, uint256 timestamp);

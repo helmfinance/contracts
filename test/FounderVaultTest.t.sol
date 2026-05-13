@@ -5,6 +5,7 @@ import "forge-std/Test.sol";
 import {Clones} from "@openzeppelin/contracts/proxy/Clones.sol";
 import "../src/core/FounderVault.sol";
 import "../src/core/AgentToken.sol";
+import "../src/system/TimeProvider.sol";
 import "./mocks/MockERC20.sol";
 import "./mocks/MockAgentVault.sol";
 
@@ -14,6 +15,7 @@ contract FounderVaultTest is Test {
     AgentToken agentToken;
     MockERC20 usdc;
     MockAgentVault mockVault;
+    TimeProvider timeProvider;
 
     address founder = address(0xF0);
     address distributor = address(0xD1);
@@ -25,6 +27,7 @@ contract FounderVaultTest is Test {
     function setUp() public {
         usdc = new MockERC20("USD Coin", "USDC", 6);
         mockVault = new MockAgentVault();
+        timeProvider = new TimeProvider();
 
         // AgentToken's vault is the AgentVault, not FounderVault.
         // For this test we use a token whose vault is address(this) so we can mint freely.
@@ -55,7 +58,8 @@ contract FounderVaultTest is Test {
             lockupDays_,
             subBps_,
             carryBps_,
-            founderShareBps_
+            founderShareBps_,
+            address(timeProvider)
         );
     }
 
@@ -82,25 +86,25 @@ contract FounderVaultTest is Test {
     function test_constructor_rejectsWrongCarryBps() public {
         FounderVault t = _cloneFV();
         vm.expectRevert(FounderVault.InvalidCarryBps.selector);
-        t.initialize(1, address(agentToken), address(mockVault), founder, address(usdc), distributor, 90, 5000, 500, 2000);
+        t.initialize(1, address(agentToken), address(mockVault), founder, address(usdc), distributor, 90, 5000, 500, 2000, address(timeProvider));
     }
 
     function test_constructor_rejectsLowFounderShareBps() public {
         FounderVault t = _cloneFV();
         vm.expectRevert(FounderVault.InvalidFounderShareBps.selector);
-        t.initialize(1, address(agentToken), address(mockVault), founder, address(usdc), distributor, 90, 5000, 1000, 400);
+        t.initialize(1, address(agentToken), address(mockVault), founder, address(usdc), distributor, 90, 5000, 1000, 400, address(timeProvider));
     }
 
     function test_constructor_rejectsHighFounderShareBps() public {
         FounderVault t = _cloneFV();
         vm.expectRevert(FounderVault.InvalidFounderShareBps.selector);
-        t.initialize(1, address(agentToken), address(mockVault), founder, address(usdc), distributor, 90, 5000, 1000, 3100);
+        t.initialize(1, address(agentToken), address(mockVault), founder, address(usdc), distributor, 90, 5000, 1000, 3100, address(timeProvider));
     }
 
     function test_constructor_rejectsShortLockup() public {
         FounderVault t = _cloneFV();
         vm.expectRevert(FounderVault.InvalidLockupDays.selector);
-        t.initialize(1, address(agentToken), address(mockVault), founder, address(usdc), distributor, 89, 5000, 1000, 2000);
+        t.initialize(1, address(agentToken), address(mockVault), founder, address(usdc), distributor, 89, 5000, 1000, 2000, address(timeProvider));
     }
 
     // ---------------------------------------------------------------

@@ -4,6 +4,7 @@ pragma solidity ^0.8.24;
 import "forge-std/Test.sol";
 import {Clones} from "@openzeppelin/contracts/proxy/Clones.sol";
 import "../src/yield/YieldHarvester.sol";
+import "../src/system/TimeProvider.sol";
 import "../src/core/AgentVault.sol";
 import "../src/core/AgentToken.sol";
 import "./mocks/MockERC20.sol";
@@ -19,6 +20,7 @@ contract YieldHarvesterTest is Test {
     MockYieldAdapter mockAdapter;
     AgentVault vault;
     AgentToken agentToken;
+    TimeProvider timeProvider;
 
     uint256 constant AGENT_ID = 1;
     address executor = address(0xEE);
@@ -29,9 +31,10 @@ contract YieldHarvesterTest is Test {
         treasury = new MockPlatformTreasury();
         mockRegistry = new MockHelmRegistry();
         mockAdapter = new MockYieldAdapter(address(usdc));
+        timeProvider = new TimeProvider();
 
         // Deploy harvester
-        harvester = new YieldHarvester(executor, address(mockRegistry), address(usdc));
+        harvester = new YieldHarvester(executor, address(mockRegistry), address(usdc), address(timeProvider));
 
         // Clone token and vault, then initialize — avoids predicted-address dance.
         AgentToken tokenImpl = new AgentToken();
@@ -60,7 +63,8 @@ contract YieldHarvesterTest is Test {
             initialPhase: IAgentVault.Phase.PublicLaunch,
             assets: ea,
             weightConstraints: ew,
-            seniorWindowDuration: 0
+            seniorWindowDuration: 0,
+            timeProvider: address(timeProvider)
         }));
 
         // Register in mock registry

@@ -9,6 +9,7 @@ import {Initializable} from "@openzeppelin/contracts/proxy/utils/Initializable.s
 import {IFounderVault} from "../interfaces/IFounderVault.sol";
 import {IAgentToken} from "../interfaces/IAgentToken.sol";
 import {IAgentVault} from "../interfaces/IAgentVault.sol";
+import {ITimeProvider} from "../interfaces/ITimeProvider.sol";
 
 /// @title FounderVault
 /// @notice Holds the founder's AGT shares under lockup and subordination rules.
@@ -74,6 +75,10 @@ contract FounderVault is IFounderVault, Initializable, ReentrancyGuard {
     /// @notice Lockup duration in days (from mandate).
     uint64 public lockupDays;
 
+    /// @notice Demo time source. Reads return `block.timestamp + offset` so
+    ///         admin can fast-forward lockup logic on testnet.
+    ITimeProvider public timeProvider;
+
     /// @notice Locks the implementation contract so only clones can be initialized.
     constructor() {
         _disableInitializers();
@@ -90,7 +95,8 @@ contract FounderVault is IFounderVault, Initializable, ReentrancyGuard {
         uint64 lockupDays_,
         uint16 subordinationThresholdBps_,
         uint16 carryBps_,
-        uint16 founderShareBps_
+        uint16 founderShareBps_,
+        address timeProvider_
     ) external override initializer {
         if (carryBps_ != REQUIRED_CARRY_BPS) revert InvalidCarryBps();
         if (founderShareBps_ < 500 || founderShareBps_ > 3000) revert InvalidFounderShareBps();
@@ -105,6 +111,11 @@ contract FounderVault is IFounderVault, Initializable, ReentrancyGuard {
         lockupDays = lockupDays_;
         subordinationThresholdBps = subordinationThresholdBps_;
         founderShareBps = founderShareBps_;
+        timeProvider = ITimeProvider(timeProvider_);
+    }
+
+    function _now() internal view returns (uint256) {
+        return timeProvider.currentTime();
     }
 
     modifier onlyFounder() {
@@ -121,7 +132,7 @@ contract FounderVault is IFounderVault, Initializable, ReentrancyGuard {
         IERC20(address(agentToken)).safeTransferFrom(msg.sender, address(this), amount);
 
         if (!_lockupSet) {
-            lockupEndsAt = uint64(block.timestamp) + lockupDays * 1 days;
+            lockupEndsAt = uint64(_now()) + lockupDays * 1 days;
             _lockupSet = true;
         }
 
@@ -133,7 +144,7 @@ contract FounderVault is IFounderVault, Initializable, ReentrancyGuard {
 
     /// @inheritdoc IFounderVault
     function withdraw(uint256 amount) external override onlyFounder nonReentrant {
-        if (block.timestamp < lockupEndsAt) revert LockupActive(lockupEndsAt);
+        if (_now() < lockupEndsAt) revert LockupActive(lockupEndsAt);
         if (amount > totalSharesHeld) revert OnlyFounder(); // reuse; no shares
 
         // Check subordination: cumulative withdrawn ratio must stay within threshold

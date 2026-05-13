@@ -7,6 +7,7 @@ import "../src/core/AgentVault.sol";
 import "../src/core/AgentToken.sol";
 import "../src/adapters/PythPriceAdapter.sol";
 import "../src/adapters/SyntheticAsset.sol";
+import "../src/system/TimeProvider.sol";
 import "./mocks/MockPyth.sol";
 import "./mocks/MockERC20.sol";
 import "./mocks/MockPlatformTreasury.sol";
@@ -19,6 +20,7 @@ contract AgentVaultTest is Test {
     PythPriceAdapter priceAdapter;
     SyntheticAsset sNVDA;
     MockPlatformTreasury treasury;
+    TimeProvider timeProvider;
 
     bytes32 constant FEED_ID = keccak256("NVDA/USD");
     uint64 constant STALENESS = 96 hours;
@@ -57,6 +59,9 @@ contract AgentVaultTest is Test {
         treasury.setFeeRate(IPlatformTreasury.FeeKind.Redeem, 50);     // 0.5%
         treasury.setFeeRate(IPlatformTreasury.FeeKind.Rebalance, 5);   // 0.05%
 
+        // TimeProvider singleton.
+        timeProvider = new TimeProvider();
+
         // With EIP-1167 clones we clone both first, then initialize. No nonce
         // prediction needed because each clone exists before its initialize call.
         AgentToken tokenImpl = new AgentToken();
@@ -88,7 +93,8 @@ contract AgentVaultTest is Test {
             initialPhase: IAgentVault.Phase.PublicLaunch,
             assets: assets,
             weightConstraints: wc,
-            seniorWindowDuration: 0
+            seniorWindowDuration: 0,
+            timeProvider: address(timeProvider)
         });
 
         vault.initialize(params);

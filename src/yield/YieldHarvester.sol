@@ -10,6 +10,7 @@ import {IAgentVault} from "../interfaces/IAgentVault.sol";
 import {IHelmRegistry} from "../interfaces/IHelmRegistry.sol";
 import {IMantleMETHAdapter} from "../interfaces/IMantleMETHAdapter.sol";
 import {IOndoUSDYAdapter} from "../interfaces/IOndoUSDYAdapter.sol";
+import {ITimeProvider} from "../interfaces/ITimeProvider.sol";
 
 /// @title YieldHarvester
 /// @notice Pulls cash yield from yield-bearing adapters (mETH, USDY) across agent
@@ -20,6 +21,7 @@ contract YieldHarvester is IYieldHarvester, ReentrancyGuard {
     address public immutable executor;
     IHelmRegistry public immutable registry;
     IERC20 public immutable usdc;
+    ITimeProvider public immutable timeProvider;
 
     /// @dev agentId → list of yield sources
     mapping(uint256 => address[]) internal _sources;
@@ -31,10 +33,16 @@ contract YieldHarvester is IYieldHarvester, ReentrancyGuard {
     /// @param executor_ BE cron signer (also allowed to register/remove sources).
     /// @param registry_ HelmRegistry for agent lookups.
     /// @param usdc_ USDC token address.
-    constructor(address executor_, address registry_, address usdc_) {
+    /// @param timeProvider_ Singleton TimeProvider for demo fast-forward.
+    constructor(address executor_, address registry_, address usdc_, address timeProvider_) {
         executor = executor_;
         registry = IHelmRegistry(registry_);
         usdc = IERC20(usdc_);
+        timeProvider = ITimeProvider(timeProvider_);
+    }
+
+    function _now() internal view returns (uint256) {
+        return timeProvider.currentTime();
     }
 
     // ─── IYieldHarvester ────────────────────────────────────────────
@@ -63,7 +71,7 @@ contract YieldHarvester is IYieldHarvester, ReentrancyGuard {
             IAgentVault(vault_).depositYield(totalUSDC);
         }
 
-        _lastHarvest[agentId] = uint64(block.timestamp);
+        _lastHarvest[agentId] = uint64(_now());
     }
 
     /// @inheritdoc IYieldHarvester

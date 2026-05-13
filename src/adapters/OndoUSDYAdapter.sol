@@ -5,6 +5,7 @@ import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import {SafeERC20} from "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
 
 import {IOndoUSDYAdapter} from "../interfaces/IOndoUSDYAdapter.sol";
+import {ITimeProvider} from "../interfaces/ITimeProvider.sol";
 
 /// @dev Mintable interface for the testnet/local USDC. Gated by MockERC20's
 ///      chainId guard, so a mistaken mainnet deployment can't print value.
@@ -43,6 +44,9 @@ contract OndoUSDYAdapter is IOndoUSDYAdapter {
     /// @notice USDC token (testnet MockERC20 with adapter as authorised minter).
     IERC20 public immutable usdc;
 
+    /// @notice Demo time source (drives `_accrueYield`-based price growth).
+    ITimeProvider public immutable timeProvider;
+
     /// @notice Per-vault USDY balance (18-dec).
     mapping(address => uint256) public vaultUsdyBalance;
 
@@ -61,10 +65,18 @@ contract OndoUSDYAdapter is IOndoUSDYAdapter {
     uint256 public lastPriceUpdateTime;
 
     /// @param usdc_ USDC token (mintable on testnet).
-    constructor(address usdc_) {
+    /// @param timeProvider_ Singleton TimeProvider for demo fast-forward.
+    constructor(address usdc_, address timeProvider_) {
         usdc = IERC20(usdc_);
+        timeProvider = ITimeProvider(timeProvider_);
         usdyPricePerShare = SCALE;
-        lastPriceUpdateTime = block.timestamp;
+        lastPriceUpdateTime = timeProvider_ == address(0)
+            ? block.timestamp
+            : ITimeProvider(timeProvider_).currentTime();
+    }
+
+    function _now() internal view returns (uint256) {
+        return timeProvider.currentTime();
     }
 
     // ─── IOndoUSDYAdapter ───────────────────────────────────────────
@@ -163,11 +175,12 @@ contract OndoUSDYAdapter is IOndoUSDYAdapter {
     // ─── internal ───────────────────────────────────────────────────
 
     function _accrueGlobalYield() internal {
-        uint256 elapsed = block.timestamp - lastPriceUpdateTime;
-        if (elapsed == 0) return;
+        uint256 nowTs = _now();
+        if (nowTs <= lastPriceUpdateTime) return;
+        uint256 elapsed = nowTs - lastPriceUpdateTime;
         uint256 yieldFactor = (SIMULATED_APY_BPS * elapsed * SCALE) / (BPS_DENOM * SECONDS_PER_YEAR);
         usdyPricePerShare += (usdyPricePerShare * yieldFactor) / SCALE;
-        lastPriceUpdateTime = block.timestamp;
+        lastPriceUpdateTime = nowTs;
     }
 
     function _accrueVaultYield(address holder) internal {
@@ -184,8 +197,9 @@ contract OndoUSDYAdapter is IOndoUSDYAdapter {
     }
 
     function _projectedPrice() internal view returns (uint256) {
-        uint256 elapsed = block.timestamp - lastPriceUpdateTime;
-        if (elapsed == 0) return usdyPricePerShare;
+        uint256 nowTs = _now();
+        if (nowTs <= lastPriceUpdateTime) return usdyPricePerShare;
+        uint256 elapsed = nowTs - lastPriceUpdateTime;
         uint256 yieldFactor = (SIMULATED_APY_BPS * elapsed * SCALE) / (BPS_DENOM * SECONDS_PER_YEAR);
         return usdyPricePerShare + (usdyPricePerShare * yieldFactor) / SCALE;
     }

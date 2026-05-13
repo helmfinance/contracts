@@ -5,6 +5,7 @@ import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import {SafeERC20} from "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
 
 import {IMantleMETHAdapter} from "../interfaces/IMantleMETHAdapter.sol";
+import {ITimeProvider} from "../interfaces/ITimeProvider.sol";
 import {IPyth} from "@pyth-sdk-solidity/IPyth.sol";
 import {PythStructs} from "@pyth-sdk-solidity/PythStructs.sol";
 
@@ -63,6 +64,9 @@ contract MantleMETHAdapter is IMantleMETHAdapter {
     /// @notice Maximum staleness tolerated for the ETH/USD feed.
     uint64 public immutable maxEthPriceStaleness;
 
+    /// @notice Demo time source (drives `_accrueYield`-based ratio growth).
+    ITimeProvider public immutable timeProvider;
+
     /// @notice Per-vault mETH balance (18-dec).
     mapping(address => uint256) public vaultMethBalance;
 
@@ -86,20 +90,29 @@ contract MantleMETHAdapter is IMantleMETHAdapter {
     /// @param meth_ Real mETH address — pass MANTLE_SEPOLIA_METH on testnet,
     ///        MANTLE_METH_MAINNET on production.
     /// @param maxEthPriceStaleness_ Max age for the Pyth ETH/USD price (seconds).
+    /// @param timeProvider_ Singleton TimeProvider for demo fast-forward.
     constructor(
         address usdc_,
         address pyth_,
         bytes32 ethUsdPriceId_,
         address meth_,
-        uint64 maxEthPriceStaleness_
+        uint64 maxEthPriceStaleness_,
+        address timeProvider_
     ) {
         usdc = IERC20(usdc_);
         pyth = IPyth(pyth_);
         ethUsdPriceId = ethUsdPriceId_;
         meth = meth_;
         maxEthPriceStaleness = maxEthPriceStaleness_;
+        timeProvider = ITimeProvider(timeProvider_);
         mEthEthRatio = SCALE;
-        lastRatioUpdateTime = block.timestamp;
+        lastRatioUpdateTime = timeProvider_ == address(0)
+            ? block.timestamp
+            : ITimeProvider(timeProvider_).currentTime();
+    }
+
+    function _now() internal view returns (uint256) {
+        return timeProvider.currentTime();
     }
 
     // ─── IMantleMETHAdapter ─────────────────────────────────────────
@@ -218,11 +231,12 @@ contract MantleMETHAdapter is IMantleMETHAdapter {
 
     /// @dev Grow `mEthEthRatio` by SIMULATED_APY_BPS for the elapsed seconds.
     function _accrueGlobalYield() internal {
-        uint256 elapsed = block.timestamp - lastRatioUpdateTime;
+        uint256 nowTs = _now();
+        uint256 elapsed = nowTs - lastRatioUpdateTime;
         if (elapsed == 0) return;
         uint256 yieldFactor = (SIMULATED_APY_BPS * elapsed * SCALE) / (BPS_DENOM * SECONDS_PER_YEAR);
         mEthEthRatio += (mEthEthRatio * yieldFactor) / SCALE;
-        lastRatioUpdateTime = block.timestamp;
+        lastRatioUpdateTime = nowTs;
     }
 
     /// @dev Capture yield for `holder` since their last touch, priced in USDC.
@@ -240,10 +254,11 @@ contract MantleMETHAdapter is IMantleMETHAdapter {
         vaultLastRatio[holder] = mEthEthRatio;
     }
 
-    /// @dev Project what `mEthEthRatio` would be at the current block, without writing state.
+    /// @dev Project what `mEthEthRatio` would be at the current time, without writing state.
     function _projectedRatio() internal view returns (uint256) {
-        uint256 elapsed = block.timestamp - lastRatioUpdateTime;
-        if (elapsed == 0) return mEthEthRatio;
+        uint256 nowTs = _now();
+        if (nowTs <= lastRatioUpdateTime) return mEthEthRatio;
+        uint256 elapsed = nowTs - lastRatioUpdateTime;
         uint256 yieldFactor = (SIMULATED_APY_BPS * elapsed * SCALE) / (BPS_DENOM * SECONDS_PER_YEAR);
         return mEthEthRatio + (mEthEthRatio * yieldFactor) / SCALE;
     }

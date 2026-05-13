@@ -4,6 +4,7 @@ pragma solidity ^0.8.24;
 import "forge-std/Test.sol";
 import {Clones} from "@openzeppelin/contracts/proxy/Clones.sol";
 import "../src/system/RedemptionQueue.sol";
+import "../src/system/TimeProvider.sol";
 import "../src/core/AgentVault.sol";
 import "../src/core/AgentToken.sol";
 import "./mocks/MockERC20.sol";
@@ -17,6 +18,7 @@ contract RedemptionQueueTest is Test {
     MockERC20 usdc;
     MockPlatformTreasury treasury;
     MockHelmRegistry mockRegistry;
+    TimeProvider timeProvider;
 
     uint256 constant AGENT_ID = 1;
     address admin = address(0xAD);
@@ -33,8 +35,9 @@ contract RedemptionQueueTest is Test {
         treasury.setFeeRate(IPlatformTreasury.FeeKind.Redeem, 50); // 0.5%
 
         mockRegistry = new MockHelmRegistry();
+        timeProvider = new TimeProvider();
 
-        queue = new RedemptionQueue(admin, address(mockRegistry));
+        queue = new RedemptionQueue(admin, address(mockRegistry), address(timeProvider));
 
         // Clone token and vault, then initialize — clones avoid the circular-
         // address problem the old constructor-based pattern needed predictions for.
@@ -64,7 +67,8 @@ contract RedemptionQueueTest is Test {
             initialPhase: IAgentVault.Phase.PublicLaunch,
             assets: emptyAssets,
             weightConstraints: emptyWc,
-            seniorWindowDuration: 0
+            seniorWindowDuration: 0,
+            timeProvider: address(timeProvider)
         }));
 
         // Set registry mock

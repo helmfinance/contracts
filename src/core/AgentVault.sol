@@ -14,6 +14,7 @@ import {IPlatformTreasury} from "../interfaces/IPlatformTreasury.sol";
 import {ISyntheticAsset} from "../interfaces/ISyntheticAsset.sol";
 import {IMantleMETHAdapter} from "../interfaces/IMantleMETHAdapter.sol";
 import {IOndoUSDYAdapter} from "../interfaces/IOndoUSDYAdapter.sol";
+import {ITimeProvider} from "../interfaces/ITimeProvider.sol";
 
 /// @title AgentVault
 /// @notice ERC-4626-shaped vault for a single Helm agent. Holds USDC plus
@@ -77,6 +78,7 @@ contract AgentVault is IAgentVault, Initializable, ReentrancyGuard {
     address public yieldHarvester;
     address public registry;
     address public pythAdapter;
+    ITimeProvider public timeProvider;
 
     // ─── mutable state ───────────────────────────────────────────────────────
 
@@ -132,6 +134,7 @@ contract AgentVault is IAgentVault, Initializable, ReentrancyGuard {
         usdc = p.usdc;
         executor = p.executor;
         phase = p.initialPhase;
+        timeProvider = ITimeProvider(p.timeProvider);
         seniorWindowDuration =
             p.seniorWindowDuration == 0 ? DEFAULT_SENIOR_WINDOW : p.seniorWindowDuration;
 
@@ -186,6 +189,10 @@ contract AgentVault is IAgentVault, Initializable, ReentrancyGuard {
     modifier notWindDown() {
         if (windDown.active) revert WindDownActive();
         _;
+    }
+
+    function _now() internal view returns (uint256) {
+        return timeProvider.currentTime();
     }
 
     // ─── ERC-20 facade (delegates to AgentToken) ─────────────────────────────
@@ -349,7 +356,7 @@ contract AgentVault is IAgentVault, Initializable, ReentrancyGuard {
         if (
             windDown.active &&
             holder == address(founderVault) &&
-            block.timestamp < windDown.seniorWindowEnd
+            _now() < windDown.seniorWindowEnd
         ) {
             revert SeniorWindowOpen(windDown.seniorWindowEnd);
         }
@@ -473,11 +480,12 @@ contract AgentVault is IAgentVault, Initializable, ReentrancyGuard {
         uint256 supply = totalSupply();
         preLossNavPerShare = supply == 0 ? 0 : (totalNAV() * SHARE_SCALE) / supply;
 
+        uint256 t = _now();
         windDown = WindDown({
             active: true,
             settled: false,
-            triggeredAt: uint64(block.timestamp),
-            seniorWindowEnd: uint64(block.timestamp) + seniorWindowDuration,
+            triggeredAt: uint64(t),
+            seniorWindowEnd: uint64(t) + seniorWindowDuration,
             reason: reason,
             seniorClaimableUsdc: 0,
             juniorClaimableUsdc: 0
@@ -520,7 +528,7 @@ contract AgentVault is IAgentVault, Initializable, ReentrancyGuard {
     function settle() external override nonReentrant {
         if (!windDown.active) revert WindDownNotActive();
         if (windDown.settled) revert AlreadySettled();
-        if (block.timestamp < windDown.seniorWindowEnd) {
+        if (_now() < windDown.seniorWindowEnd) {
             revert SeniorWindowOpen(windDown.seniorWindowEnd);
         }
         uint256 n = _assets.length;

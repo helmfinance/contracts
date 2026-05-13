@@ -4,6 +4,7 @@ pragma solidity ^0.8.24;
 import "forge-std/Test.sol";
 import {Clones} from "@openzeppelin/contracts/proxy/Clones.sol";
 import "../src/yield/DividendDistributor.sol";
+import "../src/system/TimeProvider.sol";
 import "../src/core/AgentToken.sol";
 import "../src/core/FounderVault.sol";
 import "./mocks/MockERC20.sol";
@@ -16,6 +17,7 @@ contract DividendDistributorTest is Test {
     MockHelmRegistry mockRegistry;
     AgentToken agentToken;
     FounderVault founderVault;
+    TimeProvider timeProvider;
 
     uint256 constant AGENT_ID = 1;
     address harvester;
@@ -30,8 +32,9 @@ contract DividendDistributorTest is Test {
 
         // Use a deterministic harvester address
         harvester = address(0x1111);
+        timeProvider = new TimeProvider();
 
-        distributor = new DividendDistributor(harvester, address(mockRegistry), address(usdc));
+        distributor = new DividendDistributor(harvester, address(mockRegistry), address(usdc), address(timeProvider));
 
         // AgentToken: vault = mockVaultAddr so we can mint from it
         AgentToken tokenImpl = new AgentToken();
@@ -51,7 +54,8 @@ contract DividendDistributorTest is Test {
             90,
             5000,
             1000,
-            2000
+            2000,
+            address(timeProvider)
         );
 
         // Register in mock registry

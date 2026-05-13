@@ -8,6 +8,7 @@ import {ReentrancyGuard} from "@openzeppelin/contracts/utils/ReentrancyGuard.sol
 import {IDividendDistributor} from "../interfaces/IDividendDistributor.sol";
 import {IHelmRegistry} from "../interfaces/IHelmRegistry.sol";
 import {IFounderVault} from "../interfaces/IFounderVault.sol";
+import {ITimeProvider} from "../interfaces/ITimeProvider.sol";
 
 /// @title DividendDistributor
 /// @notice Receives USDC yield, splits 90% to AGT holders / 10% to founder carry.
@@ -38,6 +39,7 @@ contract DividendDistributor is IDividendDistributor, ReentrancyGuard {
     address public immutable harvester;
     IHelmRegistry public immutable registry;
     IERC20 public immutable usdc;
+    ITimeProvider public immutable timeProvider;
 
     /// @dev agentId → current epoch counter (0 = no distributions yet)
     mapping(uint256 => uint256) internal _epochCounter;
@@ -51,10 +53,16 @@ contract DividendDistributor is IDividendDistributor, ReentrancyGuard {
     /// @param harvester_ YieldHarvester address (only caller of distribute/stageYield).
     /// @param registry_ HelmRegistry for agent lookups.
     /// @param usdc_ USDC token address.
-    constructor(address harvester_, address registry_, address usdc_) {
+    /// @param timeProvider_ Singleton TimeProvider for demo fast-forward.
+    constructor(address harvester_, address registry_, address usdc_, address timeProvider_) {
         harvester = harvester_;
         registry = IHelmRegistry(registry_);
         usdc = IERC20(usdc_);
+        timeProvider = ITimeProvider(timeProvider_);
+    }
+
+    function _now() internal view returns (uint256) {
+        return timeProvider.currentTime();
     }
 
     // ─── staging ────────────────────────────────────────────────────
@@ -93,7 +101,7 @@ contract DividendDistributor is IDividendDistributor, ReentrancyGuard {
             holdersShare: holdersAmt,
             carryShare: carry,
             totalSharesAtSnapshot: totalShares,
-            distributedAt: uint64(block.timestamp),
+            distributedAt: uint64(_now()),
             totalClaimed: 0
         });
 

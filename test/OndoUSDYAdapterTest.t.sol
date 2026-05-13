@@ -5,11 +5,13 @@ import "forge-std/Test.sol";
 
 import {OndoUSDYAdapter} from "../src/adapters/OndoUSDYAdapter.sol";
 import {IOndoUSDYAdapter} from "../src/interfaces/IOndoUSDYAdapter.sol";
+import {TimeProvider} from "../src/system/TimeProvider.sol";
 import {MockERC20} from "./mocks/MockERC20.sol";
 
 contract OndoUSDYAdapterTest is Test {
     OndoUSDYAdapter adapter;
     MockERC20 usdc;
+    TimeProvider timeProvider;
 
     address alice = address(0xA);
     address bob   = address(0xB);
@@ -18,7 +20,8 @@ contract OndoUSDYAdapterTest is Test {
     function setUp() public {
         vm.warp(1_700_000_000);
         usdc = new MockERC20("USD Coin", "USDC", 6);
-        adapter = new OndoUSDYAdapter(address(usdc));
+        timeProvider = new TimeProvider();
+        adapter = new OndoUSDYAdapter(address(usdc), address(timeProvider));
         usdc.addMinter(address(adapter));
     }
 

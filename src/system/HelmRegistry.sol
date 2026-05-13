@@ -9,6 +9,7 @@ import {IHelmRegistry} from "../interfaces/IHelmRegistry.sol";
 import {IAgentVault} from "../interfaces/IAgentVault.sol";
 import {IAgentToken} from "../interfaces/IAgentToken.sol";
 import {IFounderVault} from "../interfaces/IFounderVault.sol";
+import {ITimeProvider} from "../interfaces/ITimeProvider.sol";
 import {AgentNFT} from "./AgentNFT.sol";
 
 /// @title HelmRegistry
@@ -47,6 +48,9 @@ contract HelmRegistry is IHelmRegistry {
 
     /// @notice Singleton AgentNFT (ERC-8004 identity + reputation).
     AgentNFT public immutable agentNFT;
+
+    /// @notice Singleton TimeProvider — fed into every clone at initialize.
+    ITimeProvider public immutable timeProvider;
 
     // ─── default mandate params ────────────────────────────────────
 
@@ -95,6 +99,7 @@ contract HelmRegistry is IHelmRegistry {
         address executor;
         address distributor;
         address agentNFT;
+        address timeProvider;
         address agentTokenImpl;
         address agentVaultImpl;
         address founderVaultImpl;
@@ -113,6 +118,7 @@ contract HelmRegistry is IHelmRegistry {
         executor = p.executor;
         distributor = p.distributor;
         agentNFT = AgentNFT(p.agentNFT);
+        timeProvider = ITimeProvider(p.timeProvider);
         agentTokenImpl = p.agentTokenImpl;
         agentVaultImpl = p.agentVaultImpl;
         founderVaultImpl = p.founderVaultImpl;
@@ -165,7 +171,7 @@ contract HelmRegistry is IHelmRegistry {
             token: dr.token,
             founderVault: dr.founderVault,
             phase: Phase.Incubation,
-            incubationStart: uint64(block.timestamp),
+            incubationStart: uint64(_now()),
             mandateHash: mandateHash,
             mandateURI: mandateURI
         });
@@ -178,7 +184,7 @@ contract HelmRegistry is IHelmRegistry {
             founderVault: dr.founderVault,
             founder: msg.sender,
             phase: Phase.Incubation,
-            incubationStart: uint64(block.timestamp),
+            incubationStart: uint64(_now()),
             publicLaunchAt: 0
         }));
     }
@@ -188,7 +194,7 @@ contract HelmRegistry is IHelmRegistry {
         AgentRecord storage a = _agent(agentId);
         if (a.phase != Phase.Incubation) revert AlreadyAdvanced();
         uint64 endsAt = a.incubationStart + INCUBATION_PERIOD;
-        if (block.timestamp < endsAt) revert IncubationNotComplete(endsAt);
+        if (_now() < endsAt) revert IncubationNotComplete(endsAt);
 
         a.phase = Phase.PublicLaunch;
         IAgentVault(a.vault).enterPublicLaunch();
@@ -302,7 +308,8 @@ contract HelmRegistry is IHelmRegistry {
         // 3. FounderVault — references token and vault by address.
         IFounderVault(dr.founderVault).initialize(
             agentId, dr.token, dr.vault, founderAddr, usdc, distributor,
-            defaultLockupDays, defaultSubordinationBps, 1000, defaultFounderShareBps
+            defaultLockupDays, defaultSubordinationBps, 1000, defaultFounderShareBps,
+            address(timeProvider)
         );
     }
 
@@ -333,7 +340,8 @@ contract HelmRegistry is IHelmRegistry {
                 initialPhase: IAgentVault.Phase.Incubation,
                 assets: assets,
                 weightConstraints: weightConstraints,
-                seniorWindowDuration: 0
+                seniorWindowDuration: 0,
+                timeProvider: address(timeProvider)
             })
         );
     }
@@ -343,6 +351,10 @@ contract HelmRegistry is IHelmRegistry {
     function _agent(uint256 agentId) internal view returns (AgentRecord storage a) {
         a = _agents[agentId];
         if (a.vault == address(0)) revert AgentNotFound(agentId);
+    }
+
+    function _now() internal view returns (uint256) {
+        return timeProvider.currentTime();
     }
 
     /// @dev Simple uint to decimal string.

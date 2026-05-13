@@ -4,6 +4,7 @@ pragma solidity ^0.8.24;
 import "forge-std/Test.sol";
 import "../src/system/HelmRegistry.sol";
 import {AgentNFT} from "../src/system/AgentNFT.sol";
+import {TimeProvider} from "../src/system/TimeProvider.sol";
 import "../src/core/AgentVault.sol";
 import "../src/core/AgentToken.sol";
 import "../src/core/FounderVault.sol";
@@ -13,6 +14,7 @@ import "./mocks/MockPlatformTreasury.sol";
 contract HelmRegistryTest is Test {
     HelmRegistry registry;
     AgentNFT agentNFT;
+    TimeProvider timeProvider;
     MockERC20 usdc;
     MockPlatformTreasury treasury;
 
@@ -31,6 +33,7 @@ contract HelmRegistryTest is Test {
     function setUp() public {
         usdc = new MockERC20("USD Coin", "USDC", 6);
         treasury = new MockPlatformTreasury();
+        timeProvider = new TimeProvider();
 
         // Set mint fee to 0 for simpler test math
         treasury.setFeeRate(IPlatformTreasury.FeeKind.Mint, 0);
@@ -57,6 +60,7 @@ contract HelmRegistryTest is Test {
             executor: executor,
             distributor: distributor,
             agentNFT: address(agentNFT),
+            timeProvider: address(timeProvider),
             agentTokenImpl: tokenImpl,
             agentVaultImpl: vaultImpl,
             founderVaultImpl: fvImpl,

@@ -11,6 +11,7 @@ import {FounderVault} from "../src/core/FounderVault.sol";
 import {HelmRegistry} from "../src/system/HelmRegistry.sol";
 import {RedemptionQueue} from "../src/system/RedemptionQueue.sol";
 import {AgentNFT} from "../src/system/AgentNFT.sol";
+import {TimeProvider} from "../src/system/TimeProvider.sol";
 import {YieldHarvester} from "../src/yield/YieldHarvester.sol";
 import {DividendDistributor} from "../src/yield/DividendDistributor.sol";
 import {PythPriceAdapter} from "../src/adapters/PythPriceAdapter.sol";
@@ -49,6 +50,7 @@ contract IntegrationTest is Test {
     MockPlatformTreasury treasury;
     HelmRegistry registry;
     AgentNFT agentNFT;
+    TimeProvider timeProvider;
     YieldHarvester harvester;
     DividendDistributor distributor;
     RedemptionQueue queue;
@@ -139,13 +141,15 @@ contract IntegrationTest is Test {
         // mutual-dependency cycle (each takes the registry, and the registry
         // takes each of them). Predict the registry's CREATE address, deploy
         // the four dependents with that prediction, then deploy the registry.
+        timeProvider = new TimeProvider();
+
         uint64 nonce = vm.getNonce(address(this));
         address predictedRegistry = vm.computeCreateAddress(address(this), nonce + 4);
 
         agentNFT    = new AgentNFT(predictedRegistry, admin);
-        harvester   = new YieldHarvester(backend1, predictedRegistry, address(usdc));
-        distributor = new DividendDistributor(address(harvester), predictedRegistry, address(usdc));
-        queue       = new RedemptionQueue(admin, predictedRegistry);
+        harvester   = new YieldHarvester(backend1, predictedRegistry, address(usdc), address(timeProvider));
+        distributor = new DividendDistributor(address(harvester), predictedRegistry, address(usdc), address(timeProvider));
+        queue       = new RedemptionQueue(admin, predictedRegistry, address(timeProvider));
 
         registry = new HelmRegistry(HelmRegistry.RegistryParams({
             admin:                   admin,
@@ -157,6 +161,7 @@ contract IntegrationTest is Test {
             executor:                backend1,
             distributor:             address(distributor),
             agentNFT:                address(agentNFT),
+            timeProvider:            address(timeProvider),
             agentTokenImpl:          tokenImpl,
             agentVaultImpl:          vaultImpl,
             founderVaultImpl:        fvImpl,
@@ -255,13 +260,14 @@ contract IntegrationTest is Test {
             initialPhase:         initialPhase,
             assets:               assets,
             weightConstraints:    weights,
-            seniorWindowDuration: 0
+            seniorWindowDuration: 0,
+            timeProvider:         address(timeProvider)
         }));
 
         t.founderVault.initialize(
             agentId, address(t.token), address(t.vault),
             founder_, address(usdc), address(distributor),
-            180, 4000, 1000, 2000
+            180, 4000, 1000, 2000, address(timeProvider)
         );
 
         // Authorize the vault to mint/burn each synthetic in its mandate.
@@ -837,7 +843,7 @@ contract IntegrationTest is Test {
         // Standalone hybrid adapter — not part of the agent's mandate, used
         // purely as a yield source registered with the harvester.
         MantleMETHAdapter mEthAdapter = new MantleMETHAdapter(
-            address(usdc), address(pyth), ETH_USD_FEED, address(0), 60
+            address(usdc), address(pyth), ETH_USD_FEED, address(0), 60, address(timeProvider)
         );
         usdc.addMinter(address(mEthAdapter));
 

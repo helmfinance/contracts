@@ -5,6 +5,7 @@ import "forge-std/Test.sol";
 
 import {MantleMETHAdapter} from "../src/adapters/MantleMETHAdapter.sol";
 import {IMantleMETHAdapter} from "../src/interfaces/IMantleMETHAdapter.sol";
+import {TimeProvider} from "../src/system/TimeProvider.sol";
 import {MockERC20} from "./mocks/MockERC20.sol";
 import {MockPyth} from "./mocks/MockPyth.sol";
 
@@ -12,6 +13,7 @@ contract MantleMETHAdapterTest is Test {
     MantleMETHAdapter adapter;
     MockERC20 usdc;
     MockPyth pyth;
+    TimeProvider timeProvider;
 
     bytes32 constant ETH_USD_FEED = keccak256("ETH/USD");
     uint64  constant MAX_STALENESS = 60;
@@ -29,9 +31,10 @@ contract MantleMETHAdapterTest is Test {
         usdc = new MockERC20("USD Coin", "USDC", 6);
         pyth = new MockPyth(0);
         _setEthPrice(3000_00000); // $3000 with expo=-5
+        timeProvider = new TimeProvider();
 
         adapter = new MantleMETHAdapter(
-            address(usdc), address(pyth), ETH_USD_FEED, SEPOLIA_METH, MAX_STALENESS
+            address(usdc), address(pyth), ETH_USD_FEED, SEPOLIA_METH, MAX_STALENESS, address(timeProvider)
         );
         usdc.addMinter(address(adapter));
     }

@@ -52,7 +52,8 @@ interface IFounderVault {
         uint64 lockupDays_,
         uint16 subordinationThresholdBps_,
         uint16 carryBps_,
-        uint16 founderShareBps_
+        uint16 founderShareBps_,
+        address timeProvider_
     ) external;
 
     /// @notice Receive founder's initial share allocation. Restricted to AgentVault on first mint.
