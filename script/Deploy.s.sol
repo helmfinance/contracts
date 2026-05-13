@@ -11,6 +11,7 @@ import {HelmRegistry} from "../src/system/HelmRegistry.sol";
 import {PlatformTreasury} from "../src/system/PlatformTreasury.sol";
 import {RedemptionQueue} from "../src/system/RedemptionQueue.sol";
 import {AgentNFT} from "../src/system/AgentNFT.sol";
+import {TimeProvider} from "../src/system/TimeProvider.sol";
 
 import {YieldHarvester} from "../src/yield/YieldHarvester.sol";
 import {DividendDistributor} from "../src/yield/DividendDistributor.sol";
@@ -64,6 +65,7 @@ contract Deploy is Script {
         // singletons / system
         address registry;
         address agentNFT;
+        address timeProvider;
         address treasury;
         address harvester;
         address distributor;
@@ -121,6 +123,11 @@ contract Deploy is Script {
         console2.log("Deployer:", deployer);
         console2.log("USDC:    ", usdc);
 
+        // 0. TimeProvider — deployed first so every subsequent contract can
+        //    take its address as an immutable. Admin = deployer; the dev
+        //    fast-forward functions only unlock on chainId 5003 / 31337.
+        d.timeProvider = address(new TimeProvider());
+
         // 1. Platform treasury (deployer is initial admin).
         d.treasury = address(new PlatformTreasury(usdc, deployer));
 
@@ -133,9 +140,9 @@ contract Deploy is Script {
         address pythForAdapters = (chainId == 5003) ? PYTH_MANTLE_SEPOLIA : address(0);
         address methForAdapter  = (chainId == 5003) ? MANTLE_SEPOLIA_METH : address(0);
         d.mEthAdapter = address(new MantleMETHAdapter(
-            usdc, pythForAdapters, ETH_USD_FEED, methForAdapter, CRYPTO_MAX_STALE
+            usdc, pythForAdapters, ETH_USD_FEED, methForAdapter, CRYPTO_MAX_STALE, d.timeProvider
         ));
-        d.usdyAdapter = address(new OndoUSDYAdapter(usdc));
+        d.usdyAdapter = address(new OndoUSDYAdapter(usdc, d.timeProvider));
 
         // Grant the adapters mint authority on the testnet MockUSDC so they
         // can cover simulated yield and P&L. MockERC20.onlyMinter enforces
@@ -165,9 +172,9 @@ contract Deploy is Script {
         address predictedRegistry = vm.computeCreateAddress(deployer, nonce + 4);
 
         d.agentNFT       = address(new AgentNFT(predictedRegistry, deployer));
-        d.harvester      = address(new YieldHarvester(deployer, predictedRegistry, usdc));
-        d.distributor    = address(new DividendDistributor(d.harvester, predictedRegistry, usdc));
-        d.redemptionQueue = address(new RedemptionQueue(deployer, predictedRegistry));
+        d.harvester      = address(new YieldHarvester(deployer, predictedRegistry, usdc, d.timeProvider));
+        d.distributor    = address(new DividendDistributor(d.harvester, predictedRegistry, usdc, d.timeProvider));
+        d.redemptionQueue = address(new RedemptionQueue(deployer, predictedRegistry, d.timeProvider));
         d.registry = address(new HelmRegistry(HelmRegistry.RegistryParams({
             admin:                   deployer,
             usdc:                    usdc,
@@ -178,6 +185,7 @@ contract Deploy is Script {
             executor:                deployer,
             distributor:             d.distributor,
             agentNFT:                d.agentNFT,
+            timeProvider:            d.timeProvider,
             agentTokenImpl:          d.agentTokenImpl,
             agentVaultImpl:          d.agentVaultImpl,
             founderVaultImpl:        d.founderVaultImpl,
@@ -213,6 +221,7 @@ contract Deploy is Script {
         vm.serializeAddress(json, "usdc",             d.usdc);
         vm.serializeAddress(json, "registry",         d.registry);
         vm.serializeAddress(json, "agentNFT",         d.agentNFT);
+        vm.serializeAddress(json, "timeProvider",     d.timeProvider);
         vm.serializeAddress(json, "treasury",         d.treasury);
         vm.serializeAddress(json, "harvester",        d.harvester);
         vm.serializeAddress(json, "distributor",      d.distributor);
@@ -243,6 +252,7 @@ contract Deploy is Script {
         console2.log("usdc:            ", d.usdc);
         console2.log("registry:        ", d.registry);
         console2.log("agentNFT:        ", d.agentNFT);
+        console2.log("timeProvider:    ", d.timeProvider);
         console2.log("treasury:        ", d.treasury);
         console2.log("harvester:       ", d.harvester);
         console2.log("distributor:     ", d.distributor);
