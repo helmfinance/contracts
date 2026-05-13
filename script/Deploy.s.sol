@@ -42,11 +42,20 @@ contract Deploy is Script {
     bytes32 constant TSLA_FEED = 0x16dad506d7db8da01c87581c87ca897a012a153557d4d578c3b9c9e1bc0632f1;
     bytes32 constant MSFT_FEED = 0xd0ca23c1cc005e004ccf1db5bf76aeb6a49218f43dac3d4b275e92de12ded4d1;
 
+    /// @notice ETH/USD Pyth feed (used by MantleMETHAdapter for USDC↔mETH pricing).
+    bytes32 constant ETH_USD_FEED = 0xff61491a931112ddf1bd8147cd1b641375f79f5825126d665480874634fd0ace;
+
     /// @notice Equity-feed staleness window (96h matches PythPriceAdapter convention).
     uint64 constant EQUITY_MAX_STALE = 96 hours;
 
+    /// @notice Crypto-feed staleness window (60s, used for ETH/USD).
+    uint64 constant CRYPTO_MAX_STALE = 60;
+
     /// @notice Mantle Sepolia Pyth contract.
     address constant PYTH_MANTLE_SEPOLIA = 0x98046Bd286715D3B0BC227Dd7a956b83D8978603;
+
+    /// @notice mETH proxy on Mantle Sepolia (real token reference for the hybrid adapter).
+    address constant MANTLE_SEPOLIA_METH = 0x9EF6f9160Ba00B6621e5CB3217BB8b54a92B2828;
 
     /// @notice Output of a full deployment.
     struct Deployment {
@@ -118,9 +127,21 @@ contract Deploy is Script {
         // 2. Pyth price adapter with per-feed staleness for the 5 equities.
         d.pythAdapter = _deployPythAdapter();
 
-        // 3. Yield-bearing adapters (mocks — see TODO in each contract).
-        d.mEthAdapter = address(new MantleMETHAdapter(usdc, 1e18));
-        d.usdyAdapter = address(new OndoUSDYAdapter(usdc, 1e18));
+        // 3. Yield-bearing adapters. mETH integration is Pyth-aware (ETH/USD
+        //    pricing + 4% simulated staking yield). USDY adapter accrues 5%
+        //    APY via a global price-per-share that grows over time.
+        address pythForAdapters = (chainId == 5003) ? PYTH_MANTLE_SEPOLIA : address(0);
+        address methForAdapter  = (chainId == 5003) ? MANTLE_SEPOLIA_METH : address(0);
+        d.mEthAdapter = address(new MantleMETHAdapter(
+            usdc, pythForAdapters, ETH_USD_FEED, methForAdapter, CRYPTO_MAX_STALE
+        ));
+        d.usdyAdapter = address(new OndoUSDYAdapter(usdc));
+
+        // Grant the adapters mint authority on the testnet MockUSDC so they
+        // can cover simulated yield and P&L. MockERC20.onlyMinter enforces
+        // chainId gating internally, so this is a no-op on production chains.
+        try MockERC20(usdc).addMinter(d.mEthAdapter) {} catch {}
+        try MockERC20(usdc).addMinter(d.usdyAdapter) {} catch {}
 
         // 4. Five synthetic equities, all routing through the Pyth adapter.
         d.sNVDA = address(new SyntheticAsset("Synthetic NVIDIA",  "sNVDA", "NVDA", NVDA_FEED, d.pythAdapter, usdc));
