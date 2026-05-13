@@ -6,48 +6,65 @@ import {SafeERC20} from "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol
 
 import {IOndoUSDYAdapter} from "../interfaces/IOndoUSDYAdapter.sol";
 
-/// @dev Minimal interface used to mint simulated yield in the mock. Any
-///      mintable testnet USDC (e.g. MockERC20) satisfies this.
+/// @dev Mintable interface for the testnet/local USDC. Gated by MockERC20's
+///      chainId guard, so a mistaken mainnet deployment can't print value.
 interface IMintableUSDC {
     function mint(address to, uint256 amount) external;
 }
 
-// TODO(human): replace this mock with the real Ondo USDY contract on Mantle
-//              (USDC → USDY redeem path, real rebase accrual) before mainnet
-//              deployment. The mock simulates a constant 5% APY by minting
-//              USDC on harvest — works against a mintable testnet USDC only.
-
-/// @title OndoUSDYAdapter (MOCK)
-/// @notice Hackathon stub for Ondo's USDY (tokenised US Treasuries).
-///         Simulates a constant 5% APY on the depositor's USDC balance. The
-///         exchange rate is fixed for the mock — actual USDY rebase growth
-///         is not modelled.
-/// @dev Per-holder yield accrual: yield = balanceUsdc × 5% × dt / 365 days.
-///      harvestYield realises it to USDC (minted via IMintableUSDC) and
-///      resets the accrual timestamp.
+/// @title OndoUSDYAdapter — Mantle integration for Ondo's USDY T-bill token
+/// @notice Real USDY (Mantle Mainnet: 0x5bE26527e817998A7206475496fDE1E68957c5A6) is
+///         regulated and not available on Sepolia. This testnet adapter
+///         simulates USDY's accumulating value (~5% APY) using a global
+///         `usdyPricePerShare` that grows continuously, exposing a
+///         production-equivalent interface so the vault side stays unchanged
+///         on migration.
+/// @dev Production migration: replace `_accrueYield` with reads from Ondo's
+///      RWADynamicRateOracle (Mantle Mainnet 0xA96abbe61AfEdEB0D14a20440Ae7100D9aB4882f),
+///      replace the MockERC20.mint backstop with a real USDY redeem path,
+///      and route USDY transfers through the on-chain USDY contract.
 contract OndoUSDYAdapter is IOndoUSDYAdapter {
     using SafeERC20 for IERC20;
 
-    uint256 internal constant APY_BPS         = 500;          // 5%
-    uint256 internal constant BPS_DENOM       = 10_000;
-    uint256 internal constant SECONDS_PER_YEAR = 365 days;
-    uint256 internal constant SCALE           = 1e18;
+    /// @notice Real USDY token on Mantle Mainnet.
+    address public constant ONDO_USDY_MAINNET = 0x5bE26527e817998A7206475496fDE1E68957c5A6;
 
-    /// @notice USDC token (must be mintable for the mock yield path).
+    /// @notice Ondo's RWADynamicRateOracle on Mantle Mainnet — the production
+    ///         source of USDY's per-share accrual.
+    address public constant ONDO_USDY_ORACLE_MAINNET = 0xA96abbe61AfEdEB0D14a20440Ae7100D9aB4882f;
+
+    /// @notice Simulated annualised yield, in basis points (5%, matching USDY).
+    uint256 public constant SIMULATED_APY_BPS = 500;
+
+    uint256 internal constant BPS_DENOM        = 10_000;
+    uint256 internal constant SECONDS_PER_YEAR = 365 days;
+    uint256 internal constant SCALE            = 1e18;
+
+    /// @notice USDC token (testnet MockERC20 with adapter as authorised minter).
     IERC20 public immutable usdc;
 
-    /// @inheritdoc IOndoUSDYAdapter
-    uint256 public override exchangeRate; // 1e18 fixed; default 1e18 = 1:1
+    /// @notice Per-vault USDY balance (18-dec).
+    mapping(address => uint256) public vaultUsdyBalance;
 
-    mapping(address => uint256) internal _balances;        // USDY balance, 18-dec
-    mapping(address => uint256) internal _pendingYield;    // USDC, 6-dec
-    mapping(address => uint64)  internal _lastAccrualAt;
+    /// @notice Snapshot of `usdyPricePerShare` captured at each vault's last
+    ///         touch. Used to compute yield since last harvest.
+    mapping(address => uint256) public vaultLastPrice;
 
-    /// @param usdc_ USDC token address.
-    /// @param exchangeRate_ Initial USDY ↔ USDC rate in 1e18 fixed point.
-    constructor(address usdc_, uint256 exchangeRate_) {
+    /// @notice Pending USDC yield accrued but not yet harvested (6-dec).
+    mapping(address => uint256) internal _pendingYield;
+
+    /// @notice Global USDY price-per-share, 1e18 scaled. Starts at 1e18 and
+    ///         grows continuously at SIMULATED_APY_BPS APY.
+    uint256 public usdyPricePerShare;
+
+    /// @notice Last timestamp at which usdyPricePerShare was updated.
+    uint256 public lastPriceUpdateTime;
+
+    /// @param usdc_ USDC token (mintable on testnet).
+    constructor(address usdc_) {
         usdc = IERC20(usdc_);
-        exchangeRate = exchangeRate_;
+        usdyPricePerShare = SCALE;
+        lastPriceUpdateTime = block.timestamp;
     }
 
     // ─── IOndoUSDYAdapter ───────────────────────────────────────────
@@ -56,11 +73,18 @@ contract OndoUSDYAdapter is IOndoUSDYAdapter {
     function deposit(uint256 usdcAmount, uint256 minUsdyOut)
         external override returns (uint256 usdyReceived)
     {
-        _accrue(msg.sender);
+        _accrueGlobalYield();
+        _accrueVaultYield(msg.sender);
+
         usdc.safeTransferFrom(msg.sender, address(this), usdcAmount);
-        usdyReceived = _usdcToUsdy(usdcAmount);
+        // usdyReceived = usdcAmount * 1e12 * 1e18 / usdyPricePerShare.
+        // 6-dec USDC → 18-dec USDY, scaled by 1e18 / pricePerShare.
+        usdyReceived = (usdcAmount * 1e30) / usdyPricePerShare;
         if (usdyReceived < minUsdyOut) revert SlippageTooHigh(minUsdyOut, usdyReceived);
-        _balances[msg.sender] += usdyReceived;
+
+        vaultUsdyBalance[msg.sender] += usdyReceived;
+        vaultLastPrice[msg.sender] = usdyPricePerShare;
+
         emit Deposited(msg.sender, usdcAmount, usdyReceived);
     }
 
@@ -68,25 +92,27 @@ contract OndoUSDYAdapter is IOndoUSDYAdapter {
     function redeem(uint256 usdyAmount, uint256 minUsdcOut)
         external override returns (uint256 usdcOut)
     {
-        _accrue(msg.sender);
-        require(_balances[msg.sender] >= usdyAmount, "insufficient USDY");
-        _balances[msg.sender] -= usdyAmount;
+        _accrueGlobalYield();
+        _accrueVaultYield(msg.sender);
 
-        uint256 principalUsdc = _usdyToUsdc(usdyAmount);
-        uint256 yieldUsdc = _pendingYield[msg.sender];
-        _pendingYield[msg.sender] = 0;
+        require(vaultUsdyBalance[msg.sender] >= usdyAmount, "insufficient USDY");
+        vaultUsdyBalance[msg.sender] -= usdyAmount;
 
-        usdcOut = principalUsdc + yieldUsdc;
+        // usdcOut = usdyAmount * usdyPricePerShare / 1e30 (18-dec USDY → 6-dec USDC).
+        usdcOut = (usdyAmount * usdyPricePerShare) / 1e30;
         if (usdcOut < minUsdcOut) revert SlippageTooHigh(minUsdcOut, usdcOut);
 
-        if (yieldUsdc > 0) IMintableUSDC(address(usdc)).mint(address(this), yieldUsdc);
+        _ensureBalance(usdcOut);
         usdc.safeTransfer(msg.sender, usdcOut);
+
         emit Redeemed(msg.sender, usdyAmount, usdcOut);
     }
 
     /// @inheritdoc IOndoUSDYAdapter
+    /// @dev Mints the accrued yield as testnet USDC to msg.sender (the YieldHarvester).
     function harvestYield(address holder) external override returns (uint256 usdcOut) {
-        _accrue(holder);
+        _accrueGlobalYield();
+        _accrueVaultYield(holder);
         usdcOut = _pendingYield[holder];
         if (usdcOut == 0) return 0;
         _pendingYield[holder] = 0;
@@ -97,41 +123,76 @@ contract OndoUSDYAdapter is IOndoUSDYAdapter {
 
     /// @inheritdoc IOndoUSDYAdapter
     function balanceOfHolder(address holder) external view override returns (uint256) {
-        return _balances[holder];
+        return vaultUsdyBalance[holder];
     }
 
     /// @inheritdoc IOndoUSDYAdapter
+    /// @notice Spot USDC value at the current (projected) USDY price-per-share.
     function valueInUSDC(address holder) external view override returns (uint256) {
-        return _usdyToUsdc(_balances[holder]);
+        uint256 bal = vaultUsdyBalance[holder];
+        if (bal == 0) return 0;
+        return (bal * _projectedPrice()) / 1e30;
     }
 
-    /// @notice Pending USDC yield not yet harvested (realised + implicit accrual).
+    /// @inheritdoc IOndoUSDYAdapter
+    function exchangeRate() external view override returns (uint256) {
+        return _projectedPrice();
+    }
+
+    /// @notice Pending USDC yield (already accrued + projected since last touch).
     function pendingYieldOf(address holder) external view returns (uint256) {
-        return _pendingYield[holder] + _accruedSinceLast(holder);
+        uint256 bal = vaultUsdyBalance[holder];
+        uint256 lastP = vaultLastPrice[holder];
+        uint256 projected = _projectedPrice();
+        if (bal == 0 || lastP == 0 || projected <= lastP) return _pendingYield[holder];
+        uint256 delta = projected - lastP;
+        uint256 newAccrual = (bal * delta) / 1e30;
+        return _pendingYield[holder] + newAccrual;
+    }
+
+    /// @notice USDY token address on Mantle mainnet (production migration reference).
+    function productionUsdyAddress() external pure returns (address) {
+        return ONDO_USDY_MAINNET;
+    }
+
+    /// @notice Production RWADynamicRateOracle (Mantle mainnet).
+    function productionOracleAddress() external pure returns (address) {
+        return ONDO_USDY_ORACLE_MAINNET;
     }
 
     // ─── internal ───────────────────────────────────────────────────
 
-    function _accrue(address holder) internal {
-        uint256 acc = _accruedSinceLast(holder);
-        if (acc > 0) _pendingYield[holder] += acc;
-        _lastAccrualAt[holder] = uint64(block.timestamp);
+    function _accrueGlobalYield() internal {
+        uint256 elapsed = block.timestamp - lastPriceUpdateTime;
+        if (elapsed == 0) return;
+        uint256 yieldFactor = (SIMULATED_APY_BPS * elapsed * SCALE) / (BPS_DENOM * SECONDS_PER_YEAR);
+        usdyPricePerShare += (usdyPricePerShare * yieldFactor) / SCALE;
+        lastPriceUpdateTime = block.timestamp;
     }
 
-    function _accruedSinceLast(address holder) internal view returns (uint256) {
-        uint64 last = _lastAccrualAt[holder];
-        uint256 bal = _balances[holder];
-        if (last == 0 || bal == 0 || block.timestamp <= last) return 0;
-        uint256 dt = block.timestamp - last;
-        uint256 principalUsdc = _usdyToUsdc(bal);
-        return (principalUsdc * APY_BPS * dt) / (BPS_DENOM * SECONDS_PER_YEAR);
+    function _accrueVaultYield(address holder) internal {
+        uint256 bal = vaultUsdyBalance[holder];
+        uint256 lastP = vaultLastPrice[holder];
+        if (bal == 0 || lastP == 0 || usdyPricePerShare <= lastP) {
+            vaultLastPrice[holder] = usdyPricePerShare;
+            return;
+        }
+        uint256 delta = usdyPricePerShare - lastP;
+        uint256 newAccrualUsdc = (bal * delta) / 1e30;
+        _pendingYield[holder] += newAccrualUsdc;
+        vaultLastPrice[holder] = usdyPricePerShare;
     }
 
-    function _usdcToUsdy(uint256 usdcAmount) internal view returns (uint256) {
-        return (usdcAmount * 1e12 * SCALE) / exchangeRate;
+    function _projectedPrice() internal view returns (uint256) {
+        uint256 elapsed = block.timestamp - lastPriceUpdateTime;
+        if (elapsed == 0) return usdyPricePerShare;
+        uint256 yieldFactor = (SIMULATED_APY_BPS * elapsed * SCALE) / (BPS_DENOM * SECONDS_PER_YEAR);
+        return usdyPricePerShare + (usdyPricePerShare * yieldFactor) / SCALE;
     }
 
-    function _usdyToUsdc(uint256 usdyAmount) internal view returns (uint256) {
-        return (usdyAmount * exchangeRate) / (SCALE * 1e12);
+    function _ensureBalance(uint256 needed) internal {
+        uint256 bal = usdc.balanceOf(address(this));
+        if (bal >= needed) return;
+        IMintableUSDC(address(usdc)).mint(address(this), needed - bal);
     }
 }

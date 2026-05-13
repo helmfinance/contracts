@@ -27,6 +27,8 @@ import {MockERC20} from "./mocks/MockERC20.sol";
 import {MockPyth} from "./mocks/MockPyth.sol";
 import {MockYieldAdapter} from "./mocks/MockYieldAdapter.sol";
 import {MockPlatformTreasury} from "./mocks/MockPlatformTreasury.sol";
+import {MantleMETHAdapter} from "../src/adapters/MantleMETHAdapter.sol";
+import {OndoUSDYAdapter} from "../src/adapters/OndoUSDYAdapter.sol";
 
 /// @title IntegrationTest
 /// @notice End-to-end tests exercising the full Helm system with real contracts.
@@ -820,6 +822,58 @@ contract IntegrationTest is Test {
         vm.prank(founder1);
         vm.expectRevert(FounderVault.SubordinationBreached.selector);
         fv.withdraw((shares * 15) / 100);
+    }
+
+    /// SCENARIO: production-aware adapter yield works end-to-end. Wire a
+    /// fresh MantleMETHAdapter (Pyth-priced, 4% APY) as a yield source for
+    /// an agent, have the vault deposit some USDC, warp 30 days, harvest →
+    /// the vault's yield pool grows by ~30 days × 4% APY worth of USDC,
+    /// minted by the adapter via its MockUSDC minter role.
+    function test_productionAwareAdapter_yieldFlowsToVaultPool() public {
+        // Add an ETH/USD price feed to the existing MockPyth.
+        bytes32 ETH_USD_FEED = keccak256("ETH/USD");
+        pyth.setPrice(ETH_USD_FEED, int64(int256(uint256(3000_00000))), 50, -5, block.timestamp);
+
+        // Standalone hybrid adapter — not part of the agent's mandate, used
+        // purely as a yield source registered with the harvester.
+        MantleMETHAdapter mEthAdapter = new MantleMETHAdapter(
+            address(usdc), address(pyth), ETH_USD_FEED, address(0), 60
+        );
+        usdc.addMinter(address(mEthAdapter));
+
+        uint256 agentId = _registerAgent(founder1, keccak256("yield-mech-mandate"), 1_000e6);
+        IHelmRegistry.AgentDeployment memory d = registry.deploymentOf(agentId);
+        AgentVault v = AgentVault(d.vault);
+
+        vm.warp(block.timestamp + 30 days);
+        registry.advanceToPublic(agentId);
+        pyth.setPrice(ETH_USD_FEED, int64(int256(uint256(3000_00000))), 50, -5, block.timestamp);
+
+        // Vault stakes 500 USDC into the hybrid mETH adapter directly.
+        _giveUsdc(address(v), 500e6);
+        vm.startPrank(address(v));
+        usdc.approve(address(mEthAdapter), 500e6);
+        mEthAdapter.deposit(500e6, 0);
+        vm.stopPrank();
+
+        // Register adapter as a yield source for this agent.
+        vm.prank(backend1);
+        harvester.registerSource(agentId, address(mEthAdapter), "");
+
+        uint256 yieldPoolBefore = v.yieldPool();
+
+        // 30 days at 4% APY on 500 USDC ≈ 1.644 USDC.
+        vm.warp(block.timestamp + 30 days);
+        pyth.setPrice(ETH_USD_FEED, int64(int256(uint256(3000_00000))), 50, -5, block.timestamp);
+
+        harvester.harvest(agentId);
+
+        uint256 yielded = v.yieldPool() - yieldPoolBefore;
+        assertApproxEqAbs(yielded, 1_643_835, 5_000);
+        assertGt(yielded, 0);
+
+        // Vault's USDC balance grew by the harvested amount (depositYield
+        // pulls USDC into the vault before crediting yieldPool).
     }
 
     /// SCENARIO: NAV stays consistent across price moves and rebalances.
