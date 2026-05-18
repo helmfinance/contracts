@@ -27,5 +27,5 @@ mantle = "${MANTLE_RPC}"
 local = "http://127.0.0.1:8545"
 
 [etherscan]
-mantle_sepolia = { key = "${MANTLESCAN_KEY}", url = "https://api-sepolia.mantlescan.xyz/api" }
-mantle = { key = "${MANTLESCAN_KEY}", url = "https://api.mantlescan.xyz/api" }
+mantle_sepolia = { key = "${MANTLESCAN_KEY}", chain = 5003, url = "https://api.etherscan.io/v2/api?chainid=5003" }
+mantle = { key = "${MANTLESCAN_KEY}", chain = 5000, url = "https://api.etherscan.io/v2/api?chainid=5000" }
