@@ -147,8 +147,8 @@ await writeContract(config, {
 ```
 
 The `Instant` tier may be disabled by the agent's mandate — if so,
-`requestRedeem` reverts with `LockupTierDisabled`. Surface tier
-availability up-front by reading the mandate.
+`requestRedeem` reverts with `TierNotAllowedByMandate(uint8)`. Surface
+tier availability up-front by reading the mandate.
 
 ---
 
@@ -282,23 +282,21 @@ For read-only price freshness checks, use `pythAdapter.getPrice(feedId)`.
 | `OnlyHarvester()`                  | AgentVault             | Only the yield harvester. |
 | `OnlyRedemptionQueue()`            | AgentVault             | Only the redemption queue. |
 | `OnlyRegisteredVault()`            | adapters, treasury     | Caller is not a registered agent vault. |
-| `OnlyReporter()`                   | AgentNFT               | Reputation reporter role missing. |
 | `OnlyFounder()`                    | FounderVault           | Caller is not the agent's founder. |
 | `OnlyDistributor()`                | FounderVault           | Only the dividend distributor. |
 | `WrongPhase()`                     | AgentVault             | Action illegal in current phase (e.g. deposit during WindDown). |
 | `MandateBreach()`                  | AgentVault, registry   | Proposed action would violate the mandate's weight constraints. |
-| `IncubationPeriodNotElapsed()`     | HelmRegistry           | Can't advance to PublicLaunch before the 30-day vetting window. |
+| `IncubationNotComplete(uint64)`    | HelmRegistry           | Can't advance to PublicLaunch before the 30-day vetting window (`uint64` arg = `endsAt` unix timestamp). |
 | `InsufficientCash()`               | AgentVault             | Vault USDC short of what the redeemer needs; wait or rebalance. |
 | `InsufficientSeed()`               | HelmRegistry           | Founder seed below `MIN_SEED_USDC`. |
-| `LockupTierDisabled(uint8)`        | RedemptionQueue        | The agent's mandate doesn't permit this lockup tier. |
-| `RedeemNotUnlocked(uint64,uint64)` | RedemptionQueue        | `unlockAt` not reached yet. |
-| `RedeemAlreadyClaimed()`           | RedemptionQueue        | This request was already claimed. |
-| `AlreadyClaimed(...)`              | DividendDistributor    | This (agent, epoch, holder) was already claimed. |
+| `TierNotAllowedByMandate(uint8)`   | RedemptionQueue        | The agent's mandate doesn't permit this lockup tier (`uint8` = requested `LockupTier`). |
+| `StillLocked(uint64)`              | RedemptionQueue        | Lockup window not elapsed yet (`uint64` = `unlockAt` unix timestamp). |
+| `AlreadyClaimed()`                 | RedemptionQueue        | This redemption request was already claimed (selector `0x646cf558`). |
+| `AlreadyClaimed(uint256,uint256,address)` | DividendDistributor | This (agent, epoch, holder) was already claimed (selector `0x7f24ead1`). |
 | `EpochNotFinalized(...)`           | DividendDistributor    | Snapshot exists but isn't claimable yet. |
 | `PriceStale(...)`                  | PythPriceAdapter       | Price is older than the freshness window — call `updatePriceFeeds`. |
 | `SlippageTooHigh(...)`             | mETH / USDY adapters   | Adapter swap min-out not met. |
 | `TransfersFrozen()`                | AgentToken             | Agent in WindDown / Settled phase, transfers paused. |
-| `MandateLockedAfterIncubation()`   | AgentNFT               | Mandate can't be edited once PublicLaunch starts. |
 
 When an unrecognised custom error returns, decode the 4-byte selector
 against the ABIs in `abis/` to identify the source.
