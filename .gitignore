@@ -12,3 +12,7 @@ node_modules/
 *.swp
 .DS_Store
 pyth_update.json
+deployments/31337.json
+
+# Local anvil deploy artifact
+deployments/31337.json
